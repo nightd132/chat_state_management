@@ -1,5 +1,5 @@
 model:
-  name: "state-spaces/mamba2-130m-hf"
+  name: "state-spaces/mamba-130m-hf"
   device: "cuda"
   dtype: "float32"
 
@@ -7,3 +7,9 @@ data:
   name: "nvidia/Nemotron-RL-Instruction-Following-MultiTurnChat-v1"
   split: "train"
   max_length: 2048
+
+paths:
+  output_dir: results
+  text_history_dir: results/text_history
+  state_dir: results/states
+  plot_dir: results/plots
