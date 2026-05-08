@@ -1,8 +1,2 @@
-venv
-Test
 .env
 .venv
-D
-=1.4.0
-test.ipynb
-test_exp_2.ipynb
