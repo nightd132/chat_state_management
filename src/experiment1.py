@@ -1,0 +1,145 @@
+from Test import model_loader, state_utils, evaluate as evaluate_module, data, autoencoder, plot, utils
+import copy
+import yaml
+import torch
+import pandas as pd
+import csv
+import time
+import numpy as np
+NUM_RUNS = 5
+
+def run_baseline(model, tokenizer, snapshots, device, text_history_dir):
+    output_data = {}
+    for snap in snapshots:
+        turn_id = snap["turn_id"]
+        history_text = ""
+
+        if turn_id > 0:
+            history_text = utils.load_text(text_history_dir)
+        
+        _, baseline_latency, baseline_ppl = evaluate_module.evaluate_baseline(
+            model,
+            tokenizer,
+            history_text + snap["new_text"],
+            device=device
+        )
+        baseline_size_kb = utils.get_memory_size_kb(text_history_dir)
+        output_data[turn_id] = {
+            "baseline_latency": baseline_latency,
+            "baseline_size_kb": baseline_size_kb,
+            "baseline_ppl": baseline_ppl
+        }
+        utils.save_text(utils.concatenate_texts([history_text, snap["new_text"]]), text_history_dir)
+    return output_data
+
+def run_state_management(model, tokenizer, snapshots, device, state_dir):
+    output_data = {}
+    for snap in snapshots:
+        turn_id = snap["turn_id"]
+        
+        if turn_id == 0:
+            state_output, state_latency, state_ppl = evaluate_module.evaluate_baseline(
+                model,
+                tokenizer,
+                snap["new_text"],
+                device=device
+            )
+        else:
+            previous_state = state_utils.load_state(state_dir)
+            
+            state_output, state_latency, state_ppl = evaluate_module.evaluate(
+                model,
+                tokenizer,
+                snap["new_text"],
+                previous_state,
+                device=device
+            )
+
+        new_state = state_output.cache_params.ssm_states
+        state_utils.save_state(new_state, state_dir)
+        state_size_kb = utils.get_memory_size_kb(state_dir)
+        output_data[turn_id] = {
+            "state_latency": state_latency,
+            "state_size_kb": state_size_kb,
+            "state_ppl": state_ppl
+        }
+    return output_data
+
+def main():
+    config = utils.read_config("configs/config1.yaml")
+    
+    paths = config["paths"]
+    output_dir = paths["output_dir"]
+    text_history_dir = paths["text_history_dir"]+"/history.txt"
+    state_dir = paths["state_dir"]+"/state.pt"
+    plot_dir = paths["plot_dir"]
+
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    model, tokenizer = model_loader.load_model(
+        config["model"]["name"],
+        device=config["model"]["device"],
+        dtype=getattr(torch, config["model"]["dtype"])
+    )
+
+    dataset = data.load_data(config["data"]["name"], split=config["data"]["split"])
+    sessions = data.extract_sessions(dataset)
+
+    session = sessions[0]
+    snapshots = data.build_turn_snapshots(session)
+
+    experiment1_path = output_dir + "/experiment1/experiment1.csv"
+    print("Starting first run of Experiment 1...")
+    baseline_output = run_baseline(model, tokenizer, snapshots, device, text_history_dir)
+    print("starting state management run...")
+    state_output = run_state_management(model, tokenizer, snapshots, device, state_dir)
+    print("Completed first run of Experiment 1.")
+    for _ in range(NUM_RUNS-1):
+        print(f"Run {_+2}/{NUM_RUNS}...")
+        print("starting baseline run...")
+        baseline_data = run_baseline(model, tokenizer, snapshots, device, text_history_dir)
+        print("starting state management run...")
+        state_data = run_state_management(model, tokenizer, snapshots, device, state_dir)
+        print("aggregating results...")
+        for turn_id in baseline_data:
+            baseline_output[turn_id]["baseline_latency"] += baseline_data[turn_id]["baseline_latency"]
+            baseline_output[turn_id]["baseline_size_kb"] += baseline_data[turn_id]["baseline_size_kb"]
+            baseline_output[turn_id]["baseline_ppl"] += baseline_data[turn_id]["baseline_ppl"]
+
+            state_output[turn_id]["state_latency"] += state_data[turn_id]["state_latency"]
+            state_output[turn_id]["state_size_kb"] += state_data[turn_id]["state_size_kb"]
+            state_output[turn_id]["state_ppl"] += state_data[turn_id]["state_ppl"]
+        
+        print(f"Completed run {_+2}/{NUM_RUNS}")
+    
+    for turn_id in baseline_output:
+        baseline_output[turn_id]["baseline_latency"] /= NUM_RUNS
+        baseline_output[turn_id]["baseline_size_kb"] /= NUM_RUNS
+        baseline_output[turn_id]["baseline_ppl"] /= NUM_RUNS
+
+        state_output[turn_id]["state_latency"] /= NUM_RUNS
+        state_output[turn_id]["state_size_kb"] /= NUM_RUNS
+        state_output[turn_id]["state_ppl"] /= NUM_RUNS
+    
+    with open(experiment1_path, "w", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        writer.writerow(["turn", "baseline_latency", "state_latency", "txt_size_kb", "pt_size_kb", "baseline_ppl", "state_ppl"])
+        for turn_id in baseline_output:
+            writer.writerow([
+                turn_id,
+                baseline_output[turn_id]["baseline_latency"],
+                state_output[turn_id]["state_latency"],
+                baseline_output[turn_id]["baseline_size_kb"],
+                state_output[turn_id]["state_size_kb"],
+                baseline_output[turn_id]["baseline_ppl"],
+                state_output[turn_id]["state_ppl"]
+            ])
+
+    df = pd.read_csv(experiment1_path)
+    latency_df = df[["turn", "baseline_latency", "state_latency"]]
+    size_df = df[["turn", "txt_size_kb", "pt_size_kb"]]
+    plot.plot_memory_growth(size_df, plot_dir + "/experiment1/memory_growth.png")
+    plot.plot_latency_comparison(latency_df, plot_dir + "/experiment1/latency_comparison.png")
+    plot.plot_ppl_comparison(df[["turn", "baseline_ppl", "state_ppl"]], plot_dir + "/experiment1/perplexity_comparison.png")
+
+if __name__ == "__main__":
+    main()

@@ -1,5 +1,5 @@
 model:
-  name: "state-spaces/mamba-130m-hf"
+  name: "AntonV/mamba2-130m-hf"
   device: "cuda"
   dtype: "float32"
 
