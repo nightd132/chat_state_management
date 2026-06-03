@@ -28,6 +28,7 @@ def run_baseline(model, tokenizer, snapshots, device, text_history_dir, max_seq_
             model,
             tokenizer,
             truncated_combined_text,
+            snap["new_text"],
             device=device
         )
         if snap["role"] == "assistant":
@@ -49,6 +50,7 @@ def run_state_management(model, tokenizer, snapshots, device, state_dir):
             state_output, state_latency, state_ppl = evaluate_module.evaluate_baseline(
                 model,
                 tokenizer,
+                snap["history_text"],
                 snap["new_text"],
                 device=device
             )
@@ -63,7 +65,7 @@ def run_state_management(model, tokenizer, snapshots, device, state_dir):
                 device=device
             )
 
-        new_state = [layer.recurrent_states for layer in state_output.cache_params.layers]
+        new_state = state_utils.save_recurrent_states(state_output.cache_params)
         state_utils.save_state(new_state, state_dir)
         if snap["role"] == "assistant":
             state_size_kb = utils.get_memory_size_kb(state_dir)
