@@ -3,7 +3,9 @@
 
 ## Installation
 Install the required dependencies:
+```shell
 pip install -r requirements.txt
+```
 
 
 ## How to Run the Code
