@@ -107,6 +107,7 @@ def main():
     }
 
     save_dir = root / "autoencoders"
+    save_dir.mkdir(parents=True, exist_ok=True)
 
     for latent_dim, ae_list in ae_experiments.items():
 
