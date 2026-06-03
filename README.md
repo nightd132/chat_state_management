@@ -8,9 +8,15 @@ pip install -r requirements.txt
 
 ## How to Run the Code
 Run the scripts in the following order:
-- python -m src.experiment1
-- python -m src.autoencoder_train
-- python -m src.experiment2
+```shell
+python -m src.experiment1
+```
+```shell
+python -m src.autoencoder_train
+```
+```shell
+python -m src.experiment2
+```
 
 ## Workflow
 1. experiment1.py
@@ -20,6 +26,7 @@ Run the scripts in the following order:
 - Creates training data and train the Autoencoders for Experiment 2.
 - The training data willbe store in autoencoder_training_data folder.
 - The autoencoders will be store in autoencoders folder.
+- Note: It takes around 40 mins for running in my device.
 3. experiment2.py
 - Uses the generated training Autoencoders to run the second experiment.
 - Produces the final results.
