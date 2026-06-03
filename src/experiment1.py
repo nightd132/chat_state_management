@@ -6,9 +6,10 @@ import pandas as pd
 import csv
 import time
 import numpy as np
+from pathlib import Path
 NUM_RUNS = 5
 
-def run_baseline(model, tokenizer, snapshots, device, text_history_dir):
+def run_baseline(model, tokenizer, snapshots, device, text_history_dir, max_seq_len):
     output_data = {}
     for snap in snapshots:
         turn_id = snap["turn_id"]
@@ -19,7 +20,7 @@ def run_baseline(model, tokenizer, snapshots, device, text_history_dir):
 
         combined_text = utils.concatenate_texts([history_text, snap["new_text"]])
 
-        encoded_input = tokenizer(combined_text, max_length=max_seq_length, truncation=True, return_tensors="pt")
+        encoded_input = tokenizer(combined_text, max_length=max_seq_len, truncation=True, return_tensors="pt")
         truncated_input_ids = encoded_input["input_ids"]
         truncated_combined_text = tokenizer.decode(truncated_input_ids[0], skip_special_tokens=True)
 
@@ -54,7 +55,7 @@ def run_state_management(model, tokenizer, snapshots, device, state_dir):
         else:
             previous_state = state_utils.load_state(state_dir)
 
-            state_output, state_latency, state_ppl = evaluate_module.evaluate(
+            state_output, state_latency, state_ppl = evaluate_module.evaluate_injected_mode(
                 model,
                 tokenizer,
                 snap["new_text"],
@@ -73,14 +74,16 @@ def run_state_management(model, tokenizer, snapshots, device, state_dir):
             }
     return output_data
 
+
 def main():
     config = utils.read_config("configs/config1.yaml")
-    
     paths = config["paths"]
-    output_dir = paths["output_dir"]
-    text_history_dir = paths["text_history_dir"]+"/history.txt"
-    state_dir = paths["state_dir"]+"/state.pt"
-    plot_dir = paths["plot_dir"]
+    root = Path(__file__).parent.parent
+    output_dir = str(root) + "/" + paths["output_dir"]
+    text_history_dir = str(root) + "/" + paths["text_history_dir"]+"/history.txt"
+    state_dir = str(root) + "/" + paths["state_dir"]+"/state.pt"
+    plot_dir = str(root) + "/" + paths["plot_dir"]
+    max_seq_len = config["data"]["max_length"]
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     model, tokenizer = model_loader.load_model(
@@ -96,31 +99,36 @@ def main():
     snapshots = data.build_turn_snapshots(session)
 
     experiment1_path = output_dir + "/experiment1/experiment1.csv"
-    print("Starting first run of Experiment 1...")
-    torch.cuda.empty_cache()
-    print("starting baseline run...")
-    baseline_output = run_baseline(model, tokenizer, snapshots, device, text_history_dir)
-    print("starting state management run...")
-    state_output = run_state_management(model, tokenizer, snapshots, device, state_dir)
-    print("Completed first run of Experiment 1.")
-    for _ in range(NUM_RUNS-1):
+    baseline_output = {}
+    state_output = {}
+    for _ in range(NUM_RUNS):
         torch.cuda.empty_cache()
-        print(f"Run {_+2}/{NUM_RUNS}...")
+        print(f"Run {_+1}/{NUM_RUNS}...")
         print("starting baseline run...")
-        baseline_data = run_baseline(model, tokenizer, snapshots, device, text_history_dir)
+        baseline_data = run_baseline(model, tokenizer, snapshots, device, text_history_dir, max_seq_len=max_seq_len)
         print("starting state management run...")
         state_data = run_state_management(model, tokenizer, snapshots, device, state_dir)
         print("aggregating results...")
         for turn_id in baseline_data:
+            if turn_id not in baseline_output:
+                baseline_output[turn_id] = {}
+                baseline_output[turn_id]["baseline_latency"] = 0
+                baseline_output[turn_id]["baseline_size_kb"] = 0
+                baseline_output[turn_id]["baseline_ppl"] = 0
             baseline_output[turn_id]["baseline_latency"] += baseline_data[turn_id]["baseline_latency"]
             baseline_output[turn_id]["baseline_size_kb"] += baseline_data[turn_id]["baseline_size_kb"]
             baseline_output[turn_id]["baseline_ppl"] += baseline_data[turn_id]["baseline_ppl"]
-
+            
+            if turn_id not in state_output:
+                state_output[turn_id] = {}
+                state_output[turn_id]["state_latency"] = 0
+                state_output[turn_id]["state_size_kb"] = 0
+                state_output[turn_id]["state_ppl"] = 0
             state_output[turn_id]["state_latency"] += state_data[turn_id]["state_latency"]
             state_output[turn_id]["state_size_kb"] += state_data[turn_id]["state_size_kb"]
             state_output[turn_id]["state_ppl"] += state_data[turn_id]["state_ppl"]
 
-        print(f"Completed run {_+2}/{NUM_RUNS}")
+        print(f"Completed run {_+1}/{NUM_RUNS}")
 
     for turn_id in baseline_output:
         baseline_output[turn_id]["baseline_latency"] /= NUM_RUNS

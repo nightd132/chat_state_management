@@ -11,21 +11,19 @@ class Autoencoder(nn.Module):
         self.input_dim  = head_dim * d_state  # 64*128 = 8192
 
         self.encoder_net = nn.Sequential(
-            nn.Linear(self.input_dim, 256),
-            nn.ReLU(),
-            nn.Linear(256, self.hidden_dim)
+            nn.Linear(self.input_dim, self.hidden_dim)
+
         )
         self.decoder_net = nn.Sequential(
-            nn.Linear(self.hidden_dim, 256),
-            nn.ReLU(),
-            nn.Linear(256, self.input_dim)
+            nn.Linear(self.hidden_dim, self.input_dim)
         )
 
     def encoder(self, x):
         return self.encoder_net(x)
 
     def decoder(self, z):
-        return self.decoder_net(z)
+        out = self.decoder_net(z)
+        return out
 
     def forward(self, x):
         z = self.encoder(x)

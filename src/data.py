@@ -23,7 +23,7 @@ def build_turn_snapshots(session):
         role = turn["role"]
         content = turn["content"]
 
-        line = f"{role.capitalize()}: {content}\n"
+        line = f"{content}\n"
         history_text += line
 
         snapshots.append({
