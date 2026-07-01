@@ -4,3 +4,4 @@ __pycache__/
 *.pyc
 autoencoders
 autoencoder_training_data
+.vscode

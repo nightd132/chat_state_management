@@ -1,65 +1,42 @@
 import torch
 from pathlib import Path
-from transformers.cache_utils import DynamicCache, LinearAttentionLayer
 
 
-def save_state(state, path):
+def save_state(ssm_states: torch.Tensor, conv_states: torch.Tensor, path: str, dtype=torch.bfloat16):
+    """
+    Save (ssm_states, conv_states) to a .pt file.
+    dtype=float16 — half storage vs fp32, ~1e-3 round-trip error (safe).
+    """
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    torch.save(state, path)
-    
+    print(f"Saving state with type {ssm_states.dtype}")
+    torch.save(
+        {"ssm": ssm_states.to(dtype), "conv": conv_states.to(dtype)},
+        path,
+    )
 
-def load_state(path, device="cpu"):
-    state = torch.load(path, map_location=device)
-    return state
+
+def load_state(path: str, device="cpu"):
+    """
+    Load states saved with save_state().
+    Returns (ssm_states, conv_states) on `device`.
+    """
+    data = torch.load(path, map_location=device)
+    return data["ssm"], data["conv"]
+
 
 
 def extract_state(model_output):
-    # recurret_states [batch, heads, head_dim, d_state]
-    list_ssm_states = [layer.recurrent_states for layer in model_output.cache_params.layers]
-    return list_ssm_states
+
+    layers = model_output.cache_params.layers
+    ssm_list  = [layer.recurrent_states.cpu().float() for layer in layers]
+    conv_list = [layer.conv_states.cpu().float() for layer in layers]
+    print(f"ssm_list type {ssm_list[0].dtype}")
+    return torch.stack(ssm_list, dim=0), torch.stack(conv_list, dim=0)
 
 
-def create_cache(num_layers=24, batch_size=1, num_heads=24, head_dim=64, d_state=128, conv_dim=1792, d_conv=4, device="cpu"):
-    cache = DynamicCache()
-
-    for i in range(num_layers):
-        layer = LinearAttentionLayer()
-        layer.recurrent_states = torch.zeros(batch_size, num_heads, head_dim, d_state).to(device)
-        layer.conv_states      = torch.zeros(batch_size, conv_dim, d_conv).to(device)
-        # layer.is_conv_states_initialized = True
-        # layer.is_recurrent_states_initialized = True
-        layer.has_previous_state = True # If set to True THe cache would be injected
-        cache.layers.append(layer)
-    return cache
-
-def save_recurrent_states(cache_params):
-    return {
-        layer_idx: layer.recurrent_states.clone()
-        for layer_idx, layer in enumerate(cache_params.layers)
-        if layer.is_recurrent_states_initialized
-    }
-
-def save_conv_states(cache_params):
-    return {
-        layer_idx: layer.conv_states.clone()
-        for layer_idx, layer in enumerate(cache_params.layers)
-        if layer.is_conv_states_initialized
-    }
-
-def load_recurrent_states(saved, model, device=None, dtype=None):
-    device = device or next(model.parameters()).device
-    dtype  = dtype  or next(model.parameters()).dtype
-
-    dummy_ids = torch.zeros(1, 1, dtype=torch.long, device=device)
-    with torch.no_grad():
-        dummy_out = model(dummy_ids, use_cache=True, return_dict=True)
-
-    cache = dummy_out.cache_params
-
-    for layer_idx, recurrent_states in saved.items():
-        layer = cache.layers[layer_idx]
-        layer.lazy_initialization(recurrent_states=recurrent_states.to(device=device, dtype=dtype))
-        layer.recurrent_states.copy_(recurrent_states.to(device=device, dtype=dtype))
-
-    return cache
+def get_memory_size_kb(path: str) -> float:
+    try:
+        return Path(path).stat().st_size / 1024
+    except FileNotFoundError:
+        return 0.0
