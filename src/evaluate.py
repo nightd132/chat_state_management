@@ -19,7 +19,7 @@ def evaluate_baseline(model, tokenizer, history_text, input_text, device="cpu"):
         torch.cuda.synchronize()
     start = time.perf_counter()
 
-    with torch.no_grad():
+    with torch.inference_mode():
         output = model(input_ids=full_ids, labels=labels)
 
     if torch.cuda.is_available():
@@ -28,8 +28,9 @@ def evaluate_baseline(model, tokenizer, history_text, input_text, device="cpu"):
 
     loss = output.loss.item() if output.loss is not None else 0.0
     ppl  = math.exp(loss) if loss > 0 else 0.0
-
+    torch.cuda.empty_cache()
     return output, latency, ppl
+    
 
 
 def evaluate_injected(model, tokenizer, new_text: str, ssm_states, conv_states, device: str = "cpu"):
@@ -41,7 +42,7 @@ def evaluate_injected(model, tokenizer, new_text: str, ssm_states, conv_states, 
         torch.cuda.synchronize()
     start_time = time.perf_counter()
 
-    with torch.no_grad():
+    with torch.inference_mode():
         logits, new_ssm, new_conv = run_forward_with_states(
             model, input_ids, ssm_states, conv_states
         )
@@ -58,7 +59,7 @@ def evaluate_injected(model, tokenizer, new_text: str, ssm_states, conv_states, 
         shift_labels.view(-1),
     )
     perplexity = math.exp(loss.item())
-
+    torch.cuda.empty_cache()
     return new_ssm, new_conv, latency, perplexity
 
 

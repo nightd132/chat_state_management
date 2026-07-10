@@ -1,6 +1,6 @@
 from src import model_loader, state_utils, data, plot, utils
 from src.evaluate import evaluate_baseline, evaluate_injected
-from src.mamba2_stateful import patch_model, extract_states
+from src.mamba2_stateful import patch_model
 
 import torch
 import pandas as pd
@@ -17,6 +17,7 @@ def run_baseline_session(model, tokenizer, snapshots, device,
     history_text = ""
 
     for snap in snapshots:
+        torch.cuda.empty_cache()
         turn_id  = snap["turn_id"]
         new_text = snap["new_text"]
 
@@ -46,7 +47,14 @@ def run_baseline_session(model, tokenizer, snapshots, device,
                 "txt_size_kb": utils.get_memory_size_kb(text_history_dir)
             }
         
-        history_text = truncated_text 
+        history_text = truncated_text
+        print(
+        f"Allocated : {torch.cuda.memory_allocated()/1024**3:.2f} GB"
+        )
+        print(
+            f"Reserved  : {torch.cuda.memory_reserved()/1024**3:.2f} GB"
+        )
+
     return output_data
 
 
@@ -56,6 +64,7 @@ def run_injected_session(model, tokenizer, snapshots, device, state_dir):
     conv_states = None
 
     for snap in snapshots:
+        torch.cuda.empty_cache()
         turn_id  = snap["turn_id"]
         new_text = snap["new_text"]
 
@@ -63,13 +72,13 @@ def run_injected_session(model, tokenizer, snapshots, device, state_dir):
             # Turn 0: no prior state => run normally and extract states
             history_ids = tokenizer(snap["history_text"],
                                     return_tensors="pt").input_ids.to(device)
-            _, latency, ppl = evaluate_baseline(
+            output, latency, ppl = evaluate_baseline(
                 model, tokenizer,
                 history_text=snap["history_text"],
                 input_text=new_text,
                 device=device,
             )
-            ssm_states, conv_states = state_utils.extract_states(model)
+            ssm_states, conv_states = state_utils.extract_state(output)
 
         else:
             # Turn N: inject saved states => run only new_text tokens
@@ -90,14 +99,15 @@ def run_injected_session(model, tokenizer, snapshots, device, state_dir):
                 "state_ppl": ppl,
                 "pt_size_kb": state_size_kb,
             }
-
     return output_data
 
 
 def main():
+    torch.manual_seed(0)
     config = utils.read_config("configs/config1.yaml")
     paths = config["paths"]
     root = Path(__file__).parent.parent
+    text_history_dir = paths["text_history_dir"]+"/history.txt"
 
     output_dir = str(root) + "/" + paths["output_dir"]
     state_dir = str(root) + "/" + paths["state_dir"] + "/state.pt"
@@ -132,7 +142,7 @@ def main():
 
         baseline_result = run_baseline_session(
             model, tokenizer, snapshots, device,
-            text_history_dir=None,   # we manage history inside the function now
+            text_history_dir=text_history_dir,   # we manage history inside the function now
             max_seq_len=max_seq_len,
         )
 
@@ -140,7 +150,7 @@ def main():
         for _ in range(NUM_LATENCY_RUNS - 1):
             extra = run_baseline_session(
                 model, tokenizer, snapshots, device,
-                text_history_dir=None,
+                text_history_dir=text_history_dir,
                 max_seq_len=max_seq_len,
             )
             for turn_id in baseline_result:

@@ -148,59 +148,109 @@ def plot_speedup(df: pd.DataFrame, plot_path: str):
     plt.close(fig)
 
 
+# Experiment2 plot
 
-# def plot_perplexity_comparison(perplexity_data, plot_dir):
-#     df = pd.DataFrame(perplexity_data)
-#     plt.figure(figsize=(10, 6))
-#     original = df[df["autoencoder_latent_dim"] == df["autoencoder_latent_dim"].iloc[0]]
-#     plt.plot(original["turn"], original["state_ppl"],
-#              marker='o', linestyle='--', color='black', label="Original State")
-#     for dim, group in df.groupby("autoencoder_latent_dim"):
-#         plt.plot(group["turn"], group["compressed_ppl"],
-#                  marker='x', label=f"Compressed (dim={dim})")
-#     plt.title("Perplexity Comparison: Original vs Compressed States")
-#     plt.xlabel("Turn")
-#     plt.ylabel("Perplexity")
-#     plt.legend()
-#     plt.grid(True)
-#     plt.tight_layout()
-#     plt.savefig(f"{plot_dir}/perplexity_comparison_exp2.png")
-#     plt.close()
+def _sorted_by_turn(df, method):
+    return df[df["method"] == method].sort_values("turn")
+ 
+ 
+def plot_perplexity_comparison(df: pd.DataFrame, plot_dir: str):
+    plot_path = f"{plot_dir}/perplexity_comparison_exp2.png"
+    _ensure_dir(plot_path)
+    fig, ax = plt.subplots(figsize=(10, 6))
+ 
+    methods = sorted(df["method"].unique())
+    baseline = _sorted_by_turn(df, methods[0])
+ 
+    ax.plot(baseline["turn"], baseline["state_ppl_mean"],
+            marker="o", linestyle="--", color="black", label="Original (no compression)")
+    ax.fill_between(baseline["turn"],
+                    baseline["state_ppl_mean"] - baseline["state_ppl_std"],
+                    baseline["state_ppl_mean"] + baseline["state_ppl_std"],
+                    alpha=0.15, color="black")
+ 
+    for method in methods:
+        group = _sorted_by_turn(df, method)
+        ax.plot(group["turn"], group["compressed_ppl_mean"], marker="x", label=method)
+        ax.fill_between(group["turn"],
+                        group["compressed_ppl_mean"] - group["compressed_ppl_std"],
+                        group["compressed_ppl_mean"] + group["compressed_ppl_std"],
+                        alpha=0.15)
+ 
+    ax.set_title("Perplexity Comparison: Original vs Compressed States (mean ± std)")
+    ax.set_xlabel("Turn")
+    ax.set_ylabel("Perplexity")
+    ax.legend()
+    ax.grid(True)
+    fig.tight_layout()
+    fig.savefig(plot_path)
+    plt.close(fig)
+ 
+ 
+def plot_latency_comparison_exp2(df: pd.DataFrame, plot_dir: str):
+    plot_path = f"{plot_dir}/latency_comparison_exp2.png"
+    _ensure_dir(plot_path)
+    fig, ax = plt.subplots(figsize=(10, 6))
+ 
+    methods = sorted(df["method"].unique())
+    baseline = _sorted_by_turn(df, methods[0])
+ 
+    ax.plot(baseline["turn"], baseline["state_latency_mean"],
+            marker="o", linestyle="--", color="black", label="Baseline (no compression)")
+    ax.fill_between(baseline["turn"],
+                    baseline["state_latency_mean"] - baseline["state_latency_std"],
+                    baseline["state_latency_mean"] + baseline["state_latency_std"],
+                    alpha=0.15, color="black")
+ 
+    for method in methods:
+        group = _sorted_by_turn(df, method)
+        ax.plot(group["turn"], group["compressed_latency_mean"], marker="x", label=method)
+        ax.fill_between(group["turn"],
+                        group["compressed_latency_mean"] - group["compressed_latency_std"],
+                        group["compressed_latency_mean"] + group["compressed_latency_std"],
+                        alpha=0.15)
+ 
+    ax.set_title("Latency Comparison Across Compression Methods (mean ± std)")
+    ax.set_xlabel("Turn")
+    ax.set_ylabel("Latency (seconds)")
+    ax.legend()
+    ax.grid(True)
+    fig.tight_layout()
+    fig.savefig(plot_path)
+    plt.close(fig)
+ 
+ 
+def plot_memory_growth_exp2(df: pd.DataFrame, plot_dir: str):
+    plot_path = f"{plot_dir}/memory_growth_exp2.png"
+    _ensure_dir(plot_path)
+    fig, ax = plt.subplots(figsize=(10, 6))
+ 
+    methods = sorted(df["method"].unique())
+    baseline = _sorted_by_turn(df, methods[0])
+ 
+    ax.plot(baseline["turn"], baseline["original_size_kb_mean"],
+            marker="o", linestyle="--", color="black", label="Original State")
+    ax.fill_between(baseline["turn"],
+                    baseline["original_size_kb_mean"] - baseline["original_size_kb_std"],
+                    baseline["original_size_kb_mean"] + baseline["original_size_kb_std"],
+                    alpha=0.15, color="black")
+ 
+    for method in methods:
+        group = _sorted_by_turn(df, method)
+        ax.plot(group["turn"], group["compressed_size_kb_mean"], marker="x", label=method)
+        ax.fill_between(group["turn"],
+                        group["compressed_size_kb_mean"] - group["compressed_size_kb_std"],
+                        group["compressed_size_kb_mean"] + group["compressed_size_kb_std"],
+                        alpha=0.15)
+ 
+    ax.set_xlabel("Turn")
+    ax.set_ylabel("Memory Size (KB)")
+    ax.set_title("Memory Growth: Original vs Compressed State (mean ± std)")
+    ax.legend()
+    ax.grid(True)
+    fig.tight_layout()
+    fig.savefig(plot_path)
+    plt.close(fig)
 
-
-# def plot_latency_comparison_exp2(latency_data, plot_dir):
-#     df = pd.DataFrame(latency_data)
-#     plt.figure(figsize=(10, 6))
-#     original = df[df["autoencoder_latent_dim"] == df["autoencoder_latent_dim"].iloc[0]]
-#     plt.plot(original["turn"], original["state_latency"],
-#              marker='o', linestyle='--', color='black', label="Baseline Latency")
-#     for dim, group in df.groupby("autoencoder_latent_dim"):
-#         plt.plot(group["turn"], group["compressed_latency"],
-#                  marker='x', label=f"Compressed (dim={dim}) Latency")
-#     plt.title("Latency Comparison Across Autoencoder Latent Dimensions")
-#     plt.xlabel("Turn")
-#     plt.ylabel("Latency (seconds)")
-#     plt.legend()
-#     plt.grid(True)
-#     plt.savefig(f"{plot_dir}/latency_comparison_exp2.png")
-#     plt.close()
-
-
-# def plot_memory_growth_exp2(results, plot_dir):
-#     df = pd.DataFrame(results)
-#     plt.figure(figsize=(10, 6))
-#     original = df[df["autoencoder_latent_dim"] == df["autoencoder_latent_dim"].iloc[0]]
-#     plt.plot(original["turn"], original["original_size_kb"],
-#              marker='o', linestyle='--', color='black', label="Original State")
-#     for dim, group in df.groupby("autoencoder_latent_dim"):
-#         plt.plot(group["turn"], group["compressed_size_kb"],
-#                  marker='x', label=f"Compressed (dim={dim}) state")
-#     plt.xlabel("Turn")
-#     plt.ylabel("Memory Size (KB)")
-#     plt.title("Memory Growth: Original vs Compressed State")
-#     plt.legend()
-#     plt.grid(True)
-#     plt.savefig(f"{plot_dir}/memory_growth_exp2.png")
-#     plt.close()
 
 
