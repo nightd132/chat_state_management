@@ -193,8 +193,6 @@ def run_quantization(model, tokenizer, snapshots, device, state_dir, num_bits=8)
                 device=device
             )
 
-        # Quantize ssm_states as a whole (single scale/zero_point across all
-        # layers) for the next turn; conv_states pass through untouched.
         q_ssm, scale, zero_point = quantize_tensor(ssm_states.cpu(), num_bits=num_bits)
 
         save_compressed_payload(
@@ -336,8 +334,6 @@ def run_experiment_2(
         for method_label, turn_dict in session_results.items():
             all_results.setdefault(method_label, []).append(turn_dict)
 
-    # Aggregate each method's per-session results into per-turn mean/std,
-    # then write one combined long-format CSV: method, turn, n_sessions, <metric>_mean/_std.
     with open(experiment_2_benchmark_path, "w", newline="") as f:
         writer = csv.writer(f)
         writer.writerow([
@@ -399,17 +395,9 @@ def main():
     _, _, test_sessions = data.split_sessions(sessions, train=0.70, val=0.15, test=0.15)
     print(f"Running Experiment 2 on {len(test_sessions)} test sessions")
 
-    latent_dims = [256, 512, 1024]
+    latent_dims = [1024, 2048, 4096]
     num_layers = 24
 
-    # Trained autoencoder arm is disabled for now -- ae_experiments stays None,
-    # so run_experiment_2 skips that block entirely. To re-enable, rebuild the
-    # dict and load_state_dict from the "autoencoders" checkpoints as before,
-    # then pass it in as ae_experiments=... below.
-
-    # Control group: random-init autoencoders, no training at all. This tests
-    # whether a trained autoencoder would actually buy anything beyond what a
-    # fixed random projection of the same dimensionality already captures.
     ae_untrained_experiments = {
         ld: nn.ModuleList([
             autoencoder.Autoencoder(head_dim=64, d_state=128, hidden_dim=ld)
@@ -421,7 +409,7 @@ def main():
         for ae in ae_list:
             ae.eval()
 
-    quant_bits_list = [8, 4]
+    quant_bits_list = [16, 8]
 
     df = run_experiment_2(
         model, tokenizer, test_sessions,

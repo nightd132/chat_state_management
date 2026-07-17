@@ -6,7 +6,7 @@ model:
 data:
   name: "nvidia/Nemotron-RL-Instruction-Following-MultiTurnChat-v1"
   split: "train"
-  max_length: 4096
+  max_length: 3072
 
 paths:
   output_dir: results

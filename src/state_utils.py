@@ -3,10 +3,6 @@ from pathlib import Path
 
 
 def save_state(ssm_states: torch.Tensor, conv_states: torch.Tensor, path: str, dtype=torch.float32):
-    """
-    Save (ssm_states, conv_states) to a .pt file.
-    dtype=float16 — half storage vs fp32, ~1e-3 round-trip error (safe).
-    """
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     # print(f"Saving state with type {ssm_states.dtype}")
@@ -17,10 +13,6 @@ def save_state(ssm_states: torch.Tensor, conv_states: torch.Tensor, path: str, d
 
 
 def load_state(path: str, device="cpu"):
-    """
-    Load states saved with save_state().
-    Returns (ssm_states, conv_states) on `device`.
-    """
     data = torch.load(path, map_location=device)
     return data["ssm"], data["conv"]
 

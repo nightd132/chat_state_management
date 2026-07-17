@@ -158,33 +158,28 @@ def plot_perplexity_comparison(df: pd.DataFrame, plot_dir: str):
     plot_path = f"{plot_dir}/perplexity_comparison_exp2.png"
     _ensure_dir(plot_path)
     fig, ax = plt.subplots(figsize=(10, 6))
- 
+
     methods = sorted(df["method"].unique())
     baseline = _sorted_by_turn(df, methods[0])
- 
+
     ax.plot(baseline["turn"], baseline["state_ppl_mean"],
-            marker="o", linestyle="--", color="black", label="Original (no compression)")
-    ax.fill_between(baseline["turn"],
-                    baseline["state_ppl_mean"] - baseline["state_ppl_std"],
-                    baseline["state_ppl_mean"] + baseline["state_ppl_std"],
-                    alpha=0.15, color="black")
- 
+            marker="o", linestyle="--", color="black", linewidth=2,
+            label="Original (no compression)")
+
     for method in methods:
         group = _sorted_by_turn(df, method)
         ax.plot(group["turn"], group["compressed_ppl_mean"], marker="x", label=method)
-        ax.fill_between(group["turn"],
-                        group["compressed_ppl_mean"] - group["compressed_ppl_std"],
-                        group["compressed_ppl_mean"] + group["compressed_ppl_std"],
-                        alpha=0.15)
- 
-    ax.set_title("Perplexity Comparison: Original vs Compressed States (mean ± std)")
+
+    ax.set_yscale("log")
+    ax.set_title("Perplexity Comparison: Original vs Compressed States")
     ax.set_xlabel("Turn")
-    ax.set_ylabel("Perplexity")
-    ax.legend()
-    ax.grid(True)
+    ax.set_ylabel("Perplexity (log scale)")
+    ax.legend(fontsize=8)
+    ax.grid(True, which="both", alpha=0.3)
     fig.tight_layout()
     fig.savefig(plot_path)
     plt.close(fig)
+
  
  
 def plot_latency_comparison_exp2(df: pd.DataFrame, plot_dir: str):
