@@ -7,7 +7,7 @@ def save_state(ssm_states: torch.Tensor, conv_states: torch.Tensor, path: str, d
     path.parent.mkdir(parents=True, exist_ok=True)
     # print(f"Saving state with type {ssm_states.dtype}")
     torch.save(
-        {"ssm": ssm_states.to(dtype), "conv": conv_states.to(dtype)},
+        {"ssm": ssm_states.cpu().to(dtype), "conv": conv_states.cpu().to(dtype)},
         path,
     )
 

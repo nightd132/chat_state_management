@@ -1,7 +1,7 @@
 model:
   name: "AntonV/mamba2-130m-hf"
   device: "cuda"
-  dtype: "float32"
+  dtype: "bfloat16"
 
 data:
   name: "nvidia/Nemotron-RL-Instruction-Following-MultiTurnChat-v1"

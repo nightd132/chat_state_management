@@ -1,5 +1,6 @@
 from pathlib import Path
 import yaml
+import json
 
 def get_memory_size_kb(path):
     try:
@@ -40,3 +41,32 @@ def load_text(path):
 
 def concatenate_texts(texts):
     return "\n".join(texts)
+
+def _cache_path(output_dir, method_label, session_id):
+    cache_dir = Path(output_dir) / "cache"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    return cache_dir / f"{method_label}_session{session_id}.json"
+
+def load_cached_results(output_dir, method_label, session_id):
+    path = _cache_path(output_dir, method_label, session_id)
+    if not path.exists():
+        return None
+    with open(path) as f:
+        raw = json.load(f)
+    return {int(k): v for k, v in raw.items()}
+
+def save_cached_results(output_dir, method_label, session_id, output_data):
+    with open(_cache_path(output_dir, method_label, session_id), "w") as f:
+        json.dump(output_data, f)
+
+def run_with_cache(output_dir, method_label, session_id, force_rerun, run_fn):
+    if not force_rerun:
+        cached = load_cached_results(output_dir, method_label, session_id)
+        if cached is not None:
+            print(f"[cache] {method_label} session {session_id}: using cached results")
+            return cached
+    output_data = run_fn()
+    save_cached_results(output_dir, method_label, session_id, output_data)
+    return output_data
+
+

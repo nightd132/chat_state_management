@@ -31,7 +31,7 @@ def quantize_tensor(state: torch.Tensor, num_bits: int = 8):
 
     q_state = ((state / scale) + zero_point).round().clamp(qmin, qmax)
 
-    dtype = torch.uint8 if num_bits <= 8 else torch.int16
+    dtype = torch.uint8 if num_bits <= 8 else torch.uint16
     q_state = q_state.to(dtype)
 
     return q_state, scale.float(), zero_point.float()
@@ -52,7 +52,48 @@ def save_compressed_payload(payload: dict, path: str):
 def load_compressed_payload(path: str, device="cpu") -> dict:
     return torch.load(path, map_location=device)
 
+def run_injected_session(model, tokenizer, snapshots, device, state_dir):
+    output_data = {}
+    ssm_states  = None
+    conv_states = None
 
+    for snap in snapshots:
+        torch.cuda.empty_cache()
+        turn_id  = snap["turn_id"]
+        new_text = snap["new_text"]
+
+        if turn_id == 0:
+            # Turn 0: no prior state => run normally and extract states
+            history_ids = tokenizer(snap["history_text"],
+                                    return_tensors="pt").input_ids.to(device)
+            output, latency, ppl = evaluate_module.evaluate_baseline(
+                model, tokenizer,
+                history_text=snap["history_text"],
+                input_text=new_text,
+                device=device,
+            )
+            ssm_states, conv_states = state_utils.extract_state(output)
+
+        else:
+            # Turn N: inject saved states => run only new_text tokens
+            new_ssm, new_conv, latency, ppl = evaluate_module.evaluate_injected(
+                model, tokenizer, new_text,
+                ssm_states, conv_states,
+                device=device,
+            )
+            ssm_states  = new_ssm
+            conv_states = new_conv
+
+        if snap["role"] == "assistant":
+            state_utils.save_state(ssm_states, conv_states, state_dir)
+            state_size_kb = utils.get_memory_size_kb(state_dir)
+
+            output_data[turn_id] = {
+                "state_latency": latency,
+                "state_ppl": ppl,
+                "state_size_kb": state_size_kb,
+            }
+    return output_data
 # Baseline: no compression at all
 
 def run_state_management(model, tokenizer, snapshots, device, state_dir):
@@ -119,11 +160,17 @@ def run_autoencoder(model, tokenizer, snapshots, device, state_dir, ae_list):
             conv_states = payload["conv_states"].to(device)
 
             decompressed_layers = []
+            if torch.cuda.is_available():
+                torch.cuda.synchronize()
+            start_time = time.perf_counter()
             for layer_idx in range(num_layers):
                 latent = latents[layer_idx].to(device).unsqueeze(0)   # [1, heads, latent_dim]
                 reconstructed = ae_list[layer_idx].decoder(latent)    # [1, heads, head_dim, d_state]
                 reconstructed = reconstructed.view(1, 24, 64, 128)
                 decompressed_layers.append(reconstructed)
+            if torch.cuda.is_available():
+                torch.cuda.synchronize()
+            decomp_latency = time.perf_counter() - start_time
             ssm_states = torch.stack(decompressed_layers, dim=0)      # [num_layers, 1, heads, head_dim, d_state]
 
             ssm_states, conv_states, state_latency, state_ppl = evaluate_module.evaluate_injected(
@@ -137,13 +184,18 @@ def run_autoencoder(model, tokenizer, snapshots, device, state_dir, ae_list):
 
         # Compress ssm_states per layer for the next turn; conv_states pass through untouched.
         latents = {}
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+        start_time = time.perf_counter()
         for layer_idx in range(num_layers):
             state = ssm_states[layer_idx].to(device)               # [1, heads, head_dim, d_state]
             latent = ae_list[layer_idx].encoder(
                 state.view(1, 24, -1)                               # [1, heads, head_dim*d_state]
             )                                                       # [1, heads, latent_dim]
             latents[layer_idx] = latent.squeeze(0).cpu()            # [heads, latent_dim]
-
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+        encode_latency = time.perf_counter() - start_time
         save_compressed_payload(
             {"ssm_latents": latents, "conv_states": conv_states.cpu()},
             state_dir
@@ -152,7 +204,7 @@ def run_autoencoder(model, tokenizer, snapshots, device, state_dir, ae_list):
         if snap["role"] == "assistant":
             state_size_kb = utils.get_memory_size_kb(state_dir)
             output_data[turn_id] = {
-                "state_latency": state_latency,
+                "state_latency": state_latency + encode_latency + decomp_latency,
                 "state_size_kb": state_size_kb,
                 "state_ppl": state_ppl
             }
@@ -176,13 +228,20 @@ def run_quantization(model, tokenizer, snapshots, device, state_dir, num_bits=8)
             )
             ssm_states, conv_states = state_utils.extract_state(state_output)
         else:
-            payload = load_compressed_payload(state_dir, device=device)
-            q_ssm = payload["q_ssm"].to(device)
-            scale = payload["scale"].to(device)
-            zero_point = payload["zero_point"].to(device)
-            conv_states = payload["conv_states"].to(device)
+            
+            payload = load_compressed_payload(state_dir, device="cpu")
+            q_ssm = payload["q_ssm"]
+            scale = payload["scale"]
+            zero_point = payload["zero_point"]
+            conv_states = payload["conv_states"]
 
+            if torch.cuda.is_available():
+                torch.cuda.synchronize()
+            start_time = time.perf_counter()
             ssm_states = dequantize_tensor(q_ssm, scale, zero_point)
+            if torch.cuda.is_available():
+                torch.cuda.synchronize()
+            dequantize_latency = time.perf_counter() - start_time
 
             ssm_states, conv_states, state_latency, state_ppl = evaluate_module.evaluate_injected(
                 model,
@@ -192,9 +251,13 @@ def run_quantization(model, tokenizer, snapshots, device, state_dir, num_bits=8)
                 conv_states,
                 device=device
             )
-
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+        start_time = time.perf_counter()
         q_ssm, scale, zero_point = quantize_tensor(ssm_states.cpu(), num_bits=num_bits)
-
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+        quantize_latency = time.perf_counter() - start_time
         save_compressed_payload(
             {
                 "q_ssm": q_ssm, "scale": scale, "zero_point": zero_point,
@@ -206,13 +269,100 @@ def run_quantization(model, tokenizer, snapshots, device, state_dir, num_bits=8)
         if snap["role"] == "assistant":
             state_size_kb = utils.get_memory_size_kb(state_dir)
             output_data[turn_id] = {
-                "state_latency": state_latency,
+                "state_latency": state_latency + quantize_latency + dequantize_latency,
                 "state_size_kb": state_size_kb,
                 "state_ppl": state_ppl
             }
 
     return output_data
 
+def run_autoencoder_quantization(model, tokenizer, snapshots, device, state_dir, ae_list, num_bits=8):
+    output_data = {}
+    for ae in ae_list:
+        ae.eval()
+        ae.to(device)
+ 
+    num_layers = len(ae_list)
+ 
+    for snap in snapshots:
+        turn_id = snap["turn_id"]
+ 
+        if turn_id == 0:
+            state_output, state_latency, state_ppl = evaluate_module.evaluate_baseline(
+                model,
+                tokenizer,
+                snap["history_text"],
+                snap["new_text"],
+                device=device
+            )
+            ssm_states, conv_states = state_utils.extract_state(state_output)
+        else:
+            payload = load_compressed_payload(state_dir, device="cpu")
+            q_latents = payload["q_latents"]      # [num_layers, heads, latent_dim]
+            scale = payload["scale"]
+            zero_point = payload["zero_point"]
+            conv_states = payload["conv_states"]
+            if torch.cuda.is_available():
+                torch.cuda.synchronize()
+            start_time = time.perf_counter()
+            latents = dequantize_tensor(q_latents, scale, zero_point)  # [num_layers, heads, latent_dim]
+
+            decompressed_layers = []
+            for layer_idx in range(num_layers):
+                latent = latents[layer_idx].unsqueeze(0).to(device)    # [1, heads, latent_dim]
+                reconstructed = ae_list[layer_idx].decoder(latent)    # [1, heads, head_dim, d_state]
+                reconstructed = reconstructed.view(1, 24, 64, 128).cpu().float()
+                decompressed_layers.append(reconstructed)
+            if torch.cuda.is_available():
+                torch.cuda.synchronize()
+            decomp_latency = time.perf_counter() - start_time
+            ssm_states = torch.stack(decompressed_layers, dim=0)      # [num_layers, 1, heads, head_dim, d_state]
+
+            ssm_states, conv_states, state_latency, state_ppl = evaluate_module.evaluate_injected(
+                model,
+                tokenizer,
+                snap["new_text"],
+                ssm_states,
+                conv_states,
+                device=device
+            )
+ 
+        # Encode ssm_states per layer, stack into one tensor, then quantize
+        # the whole latent stack at once (single scale/zero_point).
+        latents = []
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+        start_time = time.perf_counter()
+        for layer_idx in range(num_layers):
+            state = ssm_states[layer_idx].to(device)                  # [1, heads, head_dim, d_state]
+            latent = ae_list[layer_idx].encoder(
+                state.view(1, 24, -1)                                  # [1, heads, head_dim*d_state]
+            )                                                          # [1, heads, latent_dim]
+            latents.append(latent.squeeze(0).cpu())                    # [heads, latent_dim]
+        latents = torch.stack(latents, dim=0)                          # [num_layers, heads, latent_dim]
+ 
+        q_latents, scale, zero_point = quantize_tensor(latents, num_bits=num_bits)
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+        encode_latency = time.perf_counter() - start_time
+
+        save_compressed_payload(
+            {
+                "q_latents": q_latents, "scale": scale, "zero_point": zero_point,
+                "conv_states": conv_states.cpu(),
+            },
+            state_dir
+        )
+ 
+        if snap["role"] == "assistant":
+            state_size_kb = utils.get_memory_size_kb(state_dir)
+            output_data[turn_id] = {
+                "state_latency": state_latency + encode_latency + decomp_latency,
+                "state_size_kb": state_size_kb,
+                "state_ppl": state_ppl
+            }
+ 
+    return output_data
 
 # Experiment runner
 
@@ -221,13 +371,16 @@ def run_experiment_2_session(
     output_dir,
     device, quant_bits_list=(8, 4),
     ae_experiments=None,           
-    ae_untrained_experiments=None 
+    ae_untrained_experiments=None,
+    force_rerun=None
 ):
+    force_rerun = force_rerun or set()
     print(f"Running original (no compression) state management for session {session_id}...")
-    original_dir = f"{output_dir}/state_original_session{session_id}.pt"
+    original_dir = f"{output_dir}/state_original_session.pt"
 
-    original_results = run_state_management(
-        model, tokenizer, snapshots, device, original_dir
+    original_results = utils.run_with_cache(
+        output_dir, "baseline", session_id, "baseline" in force_rerun,
+        lambda: run_state_management(model, tokenizer, snapshots, device, original_dir),
     )
 
     session_results = {}
@@ -257,8 +410,9 @@ def run_experiment_2_session(
 
             compress_dir = f"{output_dir}/state_compressed_ae_{latent_dim}_session{session_id}.pt"
 
-            ae_results = run_autoencoder(
-                model, tokenizer, snapshots, device, compress_dir, ae_list
+            ae_results = utils.run_with_cache(
+                output_dir, f"ae_{latent_dim}", session_id, f"ae_{latent_dim}" in force_rerun,
+                lambda: run_autoencoder(model, tokenizer, snapshots, device, compress_dir, ae_list)
             )
 
             session_results[f"ae_{latent_dim}"] = build_turn_dict(ae_results)
@@ -276,8 +430,9 @@ def run_experiment_2_session(
 
             compress_dir = f"{output_dir}/state_compressed_ae_untrained_{latent_dim}.pt"
 
-            ae_results = run_autoencoder(
-                model, tokenizer, snapshots, device, compress_dir, ae_list
+            ae_results = utils.run_with_cache(
+                output_dir, f"ae_untrained_{latent_dim}", session_id, f"ae_untrained_{latent_dim}" in force_rerun,
+                lambda: run_autoencoder(model, tokenizer, snapshots, device, compress_dir, ae_list)
             )
 
             session_results[f"ae_untrained_{latent_dim}"] = build_turn_dict(ae_results)
@@ -294,8 +449,11 @@ def run_experiment_2_session(
 
         quant_dir = f"{output_dir}/state_compressed_quant_{num_bits}bit.pt"
 
-        quant_results = run_quantization(
-            model, tokenizer, snapshots, device, quant_dir, num_bits=num_bits
+        quant_results = utils.run_with_cache(
+            output_dir, f"quant_{num_bits}bit", session_id, f"quant_{num_bits}bit" in force_rerun,
+            lambda: run_quantization(
+                model, tokenizer, snapshots, device, quant_dir, num_bits=num_bits
+            )
         )
 
         session_results[f"quant_{num_bits}bit"] = build_turn_dict(quant_results)
@@ -304,6 +462,27 @@ def run_experiment_2_session(
         print(f"{'='*50}")
         torch.cuda.empty_cache()
 
+    # untrained + quantization int 8 bit
+    if ae_untrained_experiments:
+        for latent_dim, ae_list in ae_untrained_experiments.items():
+            print(f"\n{'='*50}")
+            print(f"Session {session_id}: running UNTRAINED AE latent_dim={latent_dim}")
+            print(f"{'='*50}")
+
+            compress_dir = f"{output_dir}/state_compressed_ae_untrained_{latent_dim}_quan_8.pt"
+
+            ae_results = utils.run_with_cache(
+                output_dir, f"ae_untrained_{latent_dim}_quan_8", session_id, f"ae_untrained_{latent_dim}_quan_8" in force_rerun,
+                lambda: run_autoencoder_quantization(
+                    model, tokenizer, snapshots, device, compress_dir, ae_list, 8
+                )
+            )
+
+            session_results[f"ae_untrained_{latent_dim}_quan_8"] = build_turn_dict(ae_results)
+
+            print(f"Session {session_id}: finished UNTRAINED AE latent_dim={latent_dim} + quantization 8 bit")
+            print(f"{'='*50}")
+            torch.cuda.empty_cache()
     return session_results
 
 
@@ -312,7 +491,8 @@ def run_experiment_2(
     output_dir, experiment_2_benchmark_path, plot_dir,
     device, quant_bits_list=(8, 4),
     ae_experiments=None,
-    ae_untrained_experiments=None
+    ae_untrained_experiments=None,
+    force_rerun=None
 ):
     all_results = {}
 
@@ -328,7 +508,8 @@ def run_experiment_2(
             output_dir,
             device, quant_bits_list=quant_bits_list,
             ae_experiments=ae_experiments,
-            ae_untrained_experiments=ae_untrained_experiments
+            ae_untrained_experiments=ae_untrained_experiments,
+            force_rerun=force_rerun
         )
 
         for method_label, turn_dict in session_results.items():
@@ -409,8 +590,8 @@ def main():
         for ae in ae_list:
             ae.eval()
 
-    quant_bits_list = [16, 8]
-
+    quant_bits_list = [4, 8, 16]
+    force_rerun = {}
     df = run_experiment_2(
         model, tokenizer, test_sessions,
         output_dir + "/experiment2",
@@ -418,7 +599,8 @@ def main():
         plot_dir + "/experiment2",
         device,
         quant_bits_list=quant_bits_list,
-        ae_untrained_experiments=ae_untrained_experiments
+        ae_untrained_experiments=ae_untrained_experiments,
+        force_rerun=force_rerun
     )
 
 

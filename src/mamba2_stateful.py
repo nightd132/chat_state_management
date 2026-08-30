@@ -105,8 +105,6 @@ class StatefulMamba2Mixer(Mamba2Mixer):
         )
 
         # 2. Conv seeded from conv_state
-        # ============================================================
-
 
         if inject_conv:
             hidden_states_B_C, new_conv_state = _seeded_conv1d(

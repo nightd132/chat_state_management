@@ -5,7 +5,9 @@ __pycache__/
 autoencoders
 autoencoder_training_data
 .vscode
-test3.ipynb
 /results/experiment2/state_compressed_ae_untrain*
 /results/experiment2/state_compressed_quant*
 /results/experiment2/state_original_session*
+/results/experiment2/cache
+/results/experiment3/cache
+/results/experiment4/cache

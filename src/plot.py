@@ -249,3 +249,45 @@ def plot_memory_growth_exp2(df: pd.DataFrame, plot_dir: str):
 
 
 
+def plot_recovery_curve(df: pd.DataFrame, plot_dir: str):
+    plot_path = f"{plot_dir}/experiment3_recovery_curve.png"
+    Path(plot_path).parent.mkdir(parents=True, exist_ok=True)
+    fig, ax = plt.subplots(figsize=(10, 6))
+
+    for label in sorted(df["label"].unique()):
+        group = df[df["label"] == label].sort_values("offset")
+        ax.plot(group["offset"], group["state_ppl_mean"], marker="o", label=label)
+        ax.fill_between(
+            group["offset"],
+            group["state_ppl_mean"] - group["state_ppl_std"],
+            group["state_ppl_mean"] + group["state_ppl_std"],
+            alpha=0.15,
+        )
+
+    ax.set_xlabel("Turns since session boundary")
+    ax.set_ylabel("Perplexity")
+    ax.set_title("Recovery after session-boundary state carryover (mean ± std)")
+    ax.legend()
+    ax.grid(True)
+    fig.tight_layout()
+    fig.savefig(plot_path)
+    plt.close(fig)
+
+
+def plot_boundary_drift(df: pd.DataFrame, plot_dir: str):
+    plot_path = f"{plot_dir}/experiment3_boundary_drift.png"
+    Path(plot_path).parent.mkdir(parents=True, exist_ok=True)
+    fig, ax = plt.subplots(figsize=(10, 6))
+
+    for label in sorted(df["label"].unique()):
+        group = df[df["label"] == label].sort_values("session_id")
+        ax.plot(group["session_id"], group["boundary_ppl"], marker="x", label=label, alpha=0.8)
+
+    ax.set_xlabel("Session index in chain")
+    ax.set_ylabel("Perplexity at first turn of session (session boundary)")
+    ax.set_title("Does boundary perplexity drift as decayed carryover compounds?")
+    ax.legend()
+    ax.grid(True)
+    fig.tight_layout()
+    fig.savefig(plot_path)
+    plt.close(fig)

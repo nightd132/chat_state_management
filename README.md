@@ -32,6 +32,7 @@ python -m src.experiment2
 3. experiment2.py
 - Uses the generated training Autoencoders to run the second experiment.
 - Produces the final results.
+
 Note: The scripts must be executed sequentially because each step depends on the outputs of the previous step.
 
 ## Results
