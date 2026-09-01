@@ -1,19 +1,22 @@
-from src import model_loader, state_utils, evaluate as evaluate_module, data, autoencoder, plot, utils
-from src.mamba2_stateful import patch_model
-import copy
-import yaml
-import torch
-from torch import nn
-import pandas as pd
 import csv
 import time
-import os
 from pathlib import Path
 
+import torch
+from torch import nn
+
+from src import model_loader, state_utils, evaluate as evaluate_module, data, autoencoder, plot, utils
+from src.cache_utils import get_torch_cache_path, save_torch_cache, load_torch_cache
+from src.log_utils import print_section, print_memory_stats
+
+NUM_HEADS = 24
+HEAD_DIM = 64
+D_STATE = 128
 
 # Simple uniform affine quantization utilities (used by run_quantization)
 
 def quantize_tensor(state: torch.Tensor, num_bits: int = 8):
+    """Quantize a tensor and return values plus its scale metadata."""
     state = state.float()
     qmin = 0
     qmax = 2 ** num_bits - 1
@@ -38,68 +41,15 @@ def quantize_tensor(state: torch.Tensor, num_bits: int = 8):
 
 
 def dequantize_tensor(q_state: torch.Tensor, scale: torch.Tensor, zero_point: torch.Tensor):
+    """Reconstruct floating-point values from quantized tensor metadata."""
     return (q_state.float() - zero_point) * scale
 
-
-# Generic save/load for compressed payloads.
-
-def save_compressed_payload(payload: dict, path: str):
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    torch.save(payload, path)
-
-
-def load_compressed_payload(path: str, device="cpu") -> dict:
-    return torch.load(path, map_location=device)
-
-def run_injected_session(model, tokenizer, snapshots, device, state_dir):
-    output_data = {}
-    ssm_states  = None
-    conv_states = None
-
-    for snap in snapshots:
-        torch.cuda.empty_cache()
-        turn_id  = snap["turn_id"]
-        new_text = snap["new_text"]
-
-        if turn_id == 0:
-            # Turn 0: no prior state => run normally and extract states
-            history_ids = tokenizer(snap["history_text"],
-                                    return_tensors="pt").input_ids.to(device)
-            output, latency, ppl = evaluate_module.evaluate_baseline(
-                model, tokenizer,
-                history_text=snap["history_text"],
-                input_text=new_text,
-                device=device,
-            )
-            ssm_states, conv_states = state_utils.extract_state(output)
-
-        else:
-            # Turn N: inject saved states => run only new_text tokens
-            new_ssm, new_conv, latency, ppl = evaluate_module.evaluate_injected(
-                model, tokenizer, new_text,
-                ssm_states, conv_states,
-                device=device,
-            )
-            ssm_states  = new_ssm
-            conv_states = new_conv
-
-        if snap["role"] == "assistant":
-            state_utils.save_state(ssm_states, conv_states, state_dir)
-            state_size_kb = utils.get_memory_size_kb(state_dir)
-
-            output_data[turn_id] = {
-                "state_latency": latency,
-                "state_ppl": ppl,
-                "state_size_kb": state_size_kb,
-            }
-    return output_data
-# Baseline: no compression at all
-
 def run_state_management(model, tokenizer, snapshots, device, state_dir):
+    """Run the uncompressed recurrent-state baseline for one session."""
     output_data = {}
     for snap in snapshots:
         turn_id = snap["turn_id"]
+        decomp_latency = 0.0
 
         if turn_id == 0:
             # Turn 0: no prior state -> run fresh and get real latency/ppl
@@ -135,6 +85,7 @@ def run_state_management(model, tokenizer, snapshots, device, state_dir):
 
 # Autoencoder-based compression
 def run_autoencoder(model, tokenizer, snapshots, device, state_dir, ae_list):
+    """Run state inference while encoding states with autoencoders."""
     output_data = {}
     for ae in ae_list:
         ae.eval()
@@ -144,6 +95,7 @@ def run_autoencoder(model, tokenizer, snapshots, device, state_dir, ae_list):
 
     for snap in snapshots:
         turn_id = snap["turn_id"]
+        dequantize_latency = 0.0
 
         if turn_id == 0:
             state_output, state_latency, state_ppl = evaluate_module.evaluate_baseline(
@@ -155,7 +107,7 @@ def run_autoencoder(model, tokenizer, snapshots, device, state_dir, ae_list):
             )
             ssm_states, conv_states = state_utils.extract_state(state_output)
         else:
-            payload = load_compressed_payload(state_dir, device=device)
+            payload = load_torch_cache(state_dir, device=device)
             latents = payload["ssm_latents"]      # {layer_idx: [heads, latent_dim]}
             conv_states = payload["conv_states"].to(device)
 
@@ -166,7 +118,7 @@ def run_autoencoder(model, tokenizer, snapshots, device, state_dir, ae_list):
             for layer_idx in range(num_layers):
                 latent = latents[layer_idx].to(device).unsqueeze(0)   # [1, heads, latent_dim]
                 reconstructed = ae_list[layer_idx].decoder(latent)    # [1, heads, head_dim, d_state]
-                reconstructed = reconstructed.view(1, 24, 64, 128)
+                reconstructed = reconstructed.view(1, NUM_HEADS, HEAD_DIM, D_STATE)
                 decompressed_layers.append(reconstructed)
             if torch.cuda.is_available():
                 torch.cuda.synchronize()
@@ -190,16 +142,18 @@ def run_autoencoder(model, tokenizer, snapshots, device, state_dir, ae_list):
         for layer_idx in range(num_layers):
             state = ssm_states[layer_idx].to(device)               # [1, heads, head_dim, d_state]
             latent = ae_list[layer_idx].encoder(
-                state.view(1, 24, -1)                               # [1, heads, head_dim*d_state]
+                state.view(1, NUM_HEADS, -1)                               # [1, heads, head_dim*d_state]
             )                                                       # [1, heads, latent_dim]
             latents[layer_idx] = latent.squeeze(0).cpu()            # [heads, latent_dim]
         if torch.cuda.is_available():
             torch.cuda.synchronize()
         encode_latency = time.perf_counter() - start_time
-        save_compressed_payload(
-            {"ssm_latents": latents, "conv_states": conv_states.cpu()},
-            state_dir
-        )
+
+        payload = {
+            "ssm_latents": latents,
+            "conv_states": conv_states.cpu()
+        }
+        save_torch_cache(payload, state_dir, "exp2", "ae")
 
         if snap["role"] == "assistant":
             state_size_kb = utils.get_memory_size_kb(state_dir)
@@ -214,9 +168,11 @@ def run_autoencoder(model, tokenizer, snapshots, device, state_dir, ae_list):
 
 # Quantization-based compression
 def run_quantization(model, tokenizer, snapshots, device, state_dir, num_bits=8):
+    """Run state inference with direct SSM-state quantization."""
     output_data = {}
     for snap in snapshots:
         turn_id = snap["turn_id"]
+        decomp_latency = 0.0
 
         if turn_id == 0:
             state_output, state_latency, state_ppl = evaluate_module.evaluate_baseline(
@@ -277,6 +233,7 @@ def run_quantization(model, tokenizer, snapshots, device, state_dir, num_bits=8)
     return output_data
 
 def run_autoencoder_quantization(model, tokenizer, snapshots, device, state_dir, ae_list, num_bits=8):
+    """Run state inference with autoencoder encoding and quantization."""
     output_data = {}
     for ae in ae_list:
         ae.eval()
@@ -374,6 +331,7 @@ def run_experiment_2_session(
     ae_untrained_experiments=None,
     force_rerun=None
 ):
+    """Run all configured compression methods for one conversation."""
     force_rerun = force_rerun or set()
     print(f"Running original (no compression) state management for session {session_id}...")
     original_dir = f"{output_dir}/state_original_session.pt"
@@ -385,7 +343,20 @@ def run_experiment_2_session(
 
     session_results = {}
 
+    session_results["baseline"] = {
+        turn_id: {
+            "state_latency": metrics["state_latency"],
+            "compressed_latency": metrics["state_latency"],
+            "state_ppl": metrics["state_ppl"],
+            "compressed_ppl": metrics["state_ppl"],
+            "original_size_kb": metrics["state_size_kb"],
+            "compressed_size_kb": metrics["state_size_kb"],
+        }
+        for turn_id, metrics in original_results.items()
+    }
+
     def build_turn_dict(results):
+        """Align one method's metrics with the original turn results."""
         turn_dict = {}
         for turn_id in original_results:
             if turn_id not in results:
@@ -494,6 +465,7 @@ def run_experiment_2(
     ae_untrained_experiments=None,
     force_rerun=None
 ):
+    """Run Experiment 2 and aggregate compression results by turn."""
     all_results = {}
 
     for session_id, session in enumerate(sessions):
@@ -525,6 +497,8 @@ def run_experiment_2(
             "compressed_ppl_mean", "compressed_ppl_std",
             "original_size_kb_mean", "original_size_kb_std",
             "compressed_size_kb_mean", "compressed_size_kb_std",
+            "ppl_delta", "latency_delta", "latency_speedup",
+            "compression_ratio",
         ])
 
         for method_label, per_session_turn_dicts in all_results.items():
@@ -541,6 +515,24 @@ def run_experiment_2(
                     a.get("compressed_ppl_mean", ""), a.get("compressed_ppl_std", ""),
                     a.get("original_size_kb_mean", ""), a.get("original_size_kb_std", ""),
                     a.get("compressed_size_kb_mean", ""), a.get("compressed_size_kb_std", ""),
+                    (
+                        a["compressed_ppl_mean"] - a["state_ppl_mean"]
+                        if "compressed_ppl_mean" in a and "state_ppl_mean" in a else ""
+                    ),
+                    (
+                        a["compressed_latency_mean"] - a["state_latency_mean"]
+                        if "compressed_latency_mean" in a and "state_latency_mean" in a else ""
+                    ),
+                    (
+                        a["state_latency_mean"] / a["compressed_latency_mean"]
+                        if a.get("compressed_latency_mean", 0) not in ("", 0)
+                        and "state_latency_mean" in a else ""
+                    ),
+                    (
+                        a["original_size_kb_mean"] / a["compressed_size_kb_mean"]
+                        if a.get("compressed_size_kb_mean", 0) not in ("", 0)
+                        and "original_size_kb_mean" in a else ""
+                    ),
                 ])
 
     df = pd.read_csv(experiment_2_benchmark_path)
@@ -551,6 +543,7 @@ def run_experiment_2(
 
 
 def main():
+    """Run Experiment 2 using the configured compression sweep."""
     torch.manual_seed(0)
     config = utils.read_config("configs/config1.yaml")
 

@@ -1,18 +1,21 @@
+import csv
+from pathlib import Path
+
+import pandas as pd
+import torch
+from tqdm import tqdm
+
 from src import model_loader, state_utils, data, plot, utils
 from src.evaluate import evaluate_baseline, evaluate_injected
 from src.mamba2_stateful import patch_model
-
-import torch
-import pandas as pd
-import csv
-from pathlib import Path
-from tqdm import tqdm
+from src.log_utils import print_section, print_memory_stats
 
 NUM_LATENCY_RUNS = 1
 
 
 def run_baseline_session(model, tokenizer, snapshots, device,
                          text_history_dir, max_seq_len):
+    """Measure full-history baseline inference for one conversation."""
     output_data = {}
     history_text = ""
 
@@ -30,15 +33,22 @@ def run_baseline_session(model, tokenizer, snapshots, device,
         truncated_ids  = encoded["input_ids"]
         truncated_text = tokenizer.decode(truncated_ids[0], skip_special_tokens=True)
 
-        history_len = tokenizer(history_text, return_tensors="pt").input_ids.shape[1] \
-                      if history_text else 0
+        new_token_count = tokenizer(new_text, return_tensors="pt").input_ids.shape[1]
+        prior_ids = truncated_ids[:, :max(0, truncated_ids.shape[1] - new_token_count)]
+        truncated_history_text = tokenizer.decode(
+            prior_ids[0], skip_special_tokens=True
+        )
 
         _, latency, ppl = evaluate_baseline(
             model, tokenizer,
-            history_text=truncated_text,
+            history_text=truncated_history_text,
             input_text=new_text,
             device=device,
         )
+
+        # Persist the exact truncated history used for this turn before measuring it.
+        history_text = truncated_text
+        utils.save_text(history_text, text_history_dir)
 
         if snap["role"] == "assistant":
             output_data[turn_id] = {
@@ -46,19 +56,14 @@ def run_baseline_session(model, tokenizer, snapshots, device,
                 "baseline_ppl": ppl,
                 "txt_size_kb": utils.get_memory_size_kb(text_history_dir)
             }
-        
-        history_text = truncated_text
-        print(
-        f"Allocated : {torch.cuda.memory_allocated()/1024**3:.2f} GB"
-        )
-        print(
-            f"Reserved  : {torch.cuda.memory_reserved()/1024**3:.2f} GB"
-        )
+
+        print_memory_stats()
 
     return output_data
 
 
 def run_injected_session(model, tokenizer, snapshots, device, state_dir):
+    """Measure recurrent-state inference for one conversation."""
     output_data = {}
     ssm_states  = None
     conv_states = None
@@ -103,20 +108,22 @@ def run_injected_session(model, tokenizer, snapshots, device, state_dir):
 
 
 def main():
+    """Run Experiment 1 and save baseline/state comparison artifacts."""
     torch.manual_seed(0)
     config = utils.read_config("configs/config1.yaml")
+    
     paths = config["paths"]
     root = Path(__file__).parent.parent
-    text_history_dir = paths["text_history_dir"]+"/history.txt"
-
-    output_dir = str(root) + "/" + paths["output_dir"]
-    state_dir = str(root) + "/" + paths["state_dir"] + "/state.pt"
-    plot_dir = str(root) + "/" + paths["plot_dir"]
+    
+    text_history_dir = root / paths["text_history_dir"] / "history.txt"
+    output_dir = root / paths["output_dir"] / "experiment1"
+    state_dir = root / paths["state_dir"] / "state.pt"
+    plot_dir = root / paths["plot_dir"] / "experiment1"
+    
+    output_dir.mkdir(parents=True, exist_ok=True)
+    plot_dir.mkdir(parents=True, exist_ok=True)
+    
     max_seq_len = config["data"]["max_length"]
-
-    Path(output_dir + "/experiment1").mkdir(parents=True, exist_ok=True)
-    Path(plot_dir + "/experiment1").mkdir(parents=True, exist_ok=True)
-
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
     model, tokenizer = model_loader.load_model(
@@ -131,7 +138,7 @@ def main():
 
     # 70/15/15 split — test set only for Experiment 1
     _, _, test_sessions = data.split_sessions(sessions, train=0.70, val=0.15, test=0.15)
-    print(f"Running Experiment 1 on {len(test_sessions)} test sessions")
+    print_section(f"Running Experiment 1 on {len(test_sessions)} test sessions")
 
     all_baseline_results = []
     all_injected_results = []
@@ -183,7 +190,7 @@ def main():
     baseline_agg = data.aggregate_turn_results(all_baseline_results)
     injected_agg = data.aggregate_turn_results(all_injected_results)
 
-    csv_path = output_dir + "/experiment1/experiment1.csv"
+    csv_path = output_dir / "experiment1.csv"
     all_turns = sorted(set(baseline_agg) | set(injected_agg))
 
     with open(csv_path, "w", newline="", encoding="utf-8") as f:
@@ -197,6 +204,7 @@ def main():
             "state_latency_mean", "state_latency_std",
             "txt_size_kb_mean", "txt_size_kb_std",
             "pt_size_kb_mean", "pt_size_kb_std",
+            "ppl_delta", "latency_delta", "latency_speedup",
         ])
         for turn_id in all_turns:
             b = baseline_agg.get(turn_id, {})
@@ -216,15 +224,29 @@ def main():
                 b.get("txt_size_kb_std", ""),
                 s.get("pt_size_kb_mean", ""),
                 s.get("pt_size_kb_std", ""),
+                (
+                    s["state_ppl_mean"] - b["baseline_ppl_mean"]
+                    if "state_ppl_mean" in s and "baseline_ppl_mean" in b else ""
+                ),
+                (
+                    s["state_latency_mean"] - b["baseline_latency_mean"]
+                    if "state_latency_mean" in s and "baseline_latency_mean" in b else ""
+                ),
+                (
+                    b["baseline_latency_mean"] / s["state_latency_mean"]
+                    if s.get("state_latency_mean", 0) not in ("", 0)
+                    and "baseline_latency_mean" in b else ""
+                ),
             ])
 
     print(f"Results saved to {csv_path}")
 
     df = pd.read_csv(csv_path)
+    ppl_plot_path = plot_dir / "perplexity_comparison.png"
+    latency_plot_path = plot_dir / "latency_comparison.png"
 
-    plot.plot_ppl_comparison(df, plot_dir + "/experiment1/perplexity_comparison.png")
-
-    plot.plot_latency_comparison(df, plot_dir + "/experiment1/latency_comparison.png")
+    plot.plot_ppl_comparison(df, ppl_plot_path)
+    plot.plot_latency_comparison(df, latency_plot_path)
 
     plot.plot_memory_growth(df, plot_dir + "/experiment1/memory_growth.png")
 
@@ -236,5 +258,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-

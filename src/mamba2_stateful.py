@@ -19,6 +19,7 @@ def _seeded_conv1d(
     activation_fn,
     d_conv: int,
 ):
+    """Apply the mixer convolution using a saved rolling input buffer."""
     conv_dtype = conv1d.weight.dtype
     device = conv1d.weight.device
 
@@ -43,6 +44,7 @@ def _seeded_conv1d(
 
 
 def debug_tensor(name, x):
+    """Print tensor diagnostics for local debugging."""
     x = x.detach().float().cpu()
     print(f"\n{name}")
     print(" shape :", tuple(x.shape))
@@ -80,6 +82,7 @@ class StatefulMamba2Mixer(Mamba2Mixer):
 
 
             if isinstance(out, tuple):
+                """Run one mixer block while accepting and returning explicit state."""
                 out = out[0]
 
 
@@ -132,10 +135,6 @@ class StatefulMamba2Mixer(Mamba2Mixer):
                 xBC_t,
                 (max(self.conv_kernel_size - xBC_t.shape[-1], 0), 0),
             )[:, :, -self.conv_kernel_size:]
-
-
-
-
 
         hidden_states_B_C = apply_mask_to_padding_states(hidden_states_B_C, attention_mask)
         hidden_states_x, B, C = torch.split(
@@ -226,6 +225,7 @@ class StatefulMamba2Mixer(Mamba2Mixer):
 # Patch utility
 
 def patch_model(model) -> int:
+    """Patch Mamba blocks so they expose explicit recurrent-state forwards."""
     patched = 0
     for module in model.modules():
         if type(module).__name__ == "Mamba2Block":
@@ -249,6 +249,7 @@ def run_forward_with_states(
     ssm_states: torch.Tensor,              # (num_layers, batch, nheads, head_dim, state_size)
     conv_states: torch.Tensor,             # (num_layers, batch, conv_dim, d_conv)
 ) -> tuple:
+    """Run the full model from explicit per-layer SSM and convolution states."""
     device = next(model.parameters()).device
     input_ids = input_ids.to(device)
 
@@ -285,7 +286,6 @@ def run_forward_with_states(
     new_conv_states = torch.stack(new_conv_list, dim=0)
 
     return logits, new_ssm_states, new_conv_states
-
 
 
 

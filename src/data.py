@@ -4,11 +4,13 @@ from collections import defaultdict
 import numpy as np
 
 def load_data(dataset_name: str, split: str = "train"):
+    """Load one split of a Hugging Face dataset."""
     dataset = load_dataset(dataset_name, split=split)
     return dataset
 
 
 def extract_sessions(dataset):
+    """Extract conversation turn lists from dataset records."""
     sessions = []
     for sample in dataset:
         dialog = sample["responses_create_params"]["input"]
@@ -17,6 +19,7 @@ def extract_sessions(dataset):
 
 
 def split_sessions(sessions, train=0.70, val=0.15, test=0.15, seed=42):
+    """Shuffle and split sessions into reproducible train/validation/test sets."""
     rng = random.Random(seed)
     indices = list(range(len(sessions)))
     rng.shuffle(indices)
@@ -41,6 +44,7 @@ def split_sessions(sessions, train=0.70, val=0.15, test=0.15, seed=42):
 
 
 def build_turn_snapshots(session):
+    """Build cumulative-history snapshots for each turn in a conversation."""
     snapshots = []
     history_text = ""
     turn_id = 0
@@ -63,6 +67,7 @@ def build_turn_snapshots(session):
 
 
 def aggregate_turn_results(all_session_results):
+    """Compute per-turn means and standard deviations across sessions."""
 
     # Collect values per turn per metric
     turn_metric_values = defaultdict(lambda: defaultdict(list))
@@ -82,5 +87,4 @@ def aggregate_turn_results(all_session_results):
         aggregated[turn_id]["n_sessions"] = n
 
     return aggregated
-
 

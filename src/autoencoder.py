@@ -4,6 +4,7 @@ import torch.nn as nn
 
 class Autoencoder(nn.Module):
     def __init__(self, head_dim, d_state, hidden_dim):
+        """Create an autoencoder for flattened per-head recurrent states."""
         super().__init__()
         self.hidden_dim = hidden_dim
         self.head_dim   = head_dim
@@ -19,18 +20,22 @@ class Autoencoder(nn.Module):
         )
 
     def encoder(self, x):
+        """Map flattened state vectors into the latent representation."""
         return self.encoder_net(x)
 
     def decoder(self, z):
+        """Reconstruct flattened state vectors from latent representations."""
         out = self.decoder_net(z)
         return out
 
     def forward(self, x):
+        """Encode and reconstruct a batch of state vectors."""
         z = self.encoder(x)
         reconstructed = self.decoder(z)
         return reconstructed, z
 
     def fit(self, states, num_epochs=10, batch_size=256, learning_rate=1e-3, device="cpu"):
+        """Train the autoencoder and return the average loss per epoch."""
         self.to(device)
         self.train()
 
