@@ -4,11 +4,13 @@ from collections import defaultdict
 import numpy as np
 
 def load_data(dataset_name: str, split: str = "train"):
+    """Load one split of a Hugging Face dataset."""
     dataset = load_dataset(dataset_name, split=split)
     return dataset
 
 
 def extract_sessions(dataset):
+    """Extract conversation turn lists from dataset records."""
     sessions = []
     for sample in dataset:
         dialog = sample["responses_create_params"]["input"]
@@ -17,6 +19,7 @@ def extract_sessions(dataset):
 
 
 def split_sessions(sessions, train=0.70, val=0.15, test=0.15, seed=42):
+    """Shuffle and split sessions into reproducible train/validation/test sets."""
     rng = random.Random(seed)
     indices = list(range(len(sessions)))
     rng.shuffle(indices)
@@ -41,6 +44,7 @@ def split_sessions(sessions, train=0.70, val=0.15, test=0.15, seed=42):
 
 
 def build_turn_snapshots(session):
+    """Build cumulative-history snapshots for each turn in a conversation."""
     snapshots = []
     history_text = ""
     turn_id = 0
@@ -63,12 +67,17 @@ def build_turn_snapshots(session):
 
 
 def aggregate_turn_results(all_session_results):
+    """Compute per-turn means and standard deviations across sessions."""
 
     # Collect values per turn per metric
     turn_metric_values = defaultdict(lambda: defaultdict(list))
     for session_result in all_session_results:
         for turn_id, metrics in session_result.items():
             for metric, value in metrics.items():
+                if value is None:
+                    continue
+                if isinstance(value, float) and np.isnan(value):
+                    continue
                 turn_metric_values[turn_id][metric].append(value)
 
     aggregated = {}
@@ -76,11 +85,16 @@ def aggregate_turn_results(all_session_results):
         aggregated[turn_id] = {}
         n = None
         for metric, values in turn_metric_values[turn_id].items():
-            aggregated[turn_id][f"{metric}_mean"] = float(np.mean(values))
-            aggregated[turn_id][f"{metric}_std"]  = float(np.std(values))
-            n = len(values)
+            valid_values = [float(v) for v in values if v is not None and not (isinstance(v, float) and np.isnan(v))]
+            if not valid_values:
+                aggregated[turn_id][f"{metric}_mean"] = float("nan")
+                aggregated[turn_id][f"{metric}_std"] = float("nan")
+                n = 0
+                continue
+            aggregated[turn_id][f"{metric}_mean"] = float(np.mean(valid_values))
+            aggregated[turn_id][f"{metric}_std"] = float(np.std(valid_values))
+            n = len(valid_values)
         aggregated[turn_id]["n_sessions"] = n
 
     return aggregated
-
 

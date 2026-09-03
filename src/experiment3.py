@@ -1,134 +1,62 @@
-from src import model_loader, state_utils, evaluate as evaluate_module, data, utils, plot
-from src.mamba2_stateful import patch_model
-import torch
-import pandas as pd
 import csv
 from pathlib import Path
-from collections import defaultdict
-import numpy as np
+
+import pandas as pd
+import torch
+
+from src import model_loader, state_utils, evaluate, data, utils, plot
+from src.mamba2_stateful import patch_model
+from src.aggregation_utils import (
+    aggregate_by_boundary_offset,
+    aggregate_boundary_only_by_session,
+    summarize_boundary_health,
+    write_boundary_sequence_csv,
+    write_experiment_summary_csv,
+)
+from src.cache_utils import get_torch_cache_path, load_torch_cache, save_torch_cache
+from src.log_utils import print_section, log_cache_load
+from src.state_runner import StateRunner
 
 
-def apply_forgetting_factor(ssm_states: torch.Tensor, alpha: float):
+def apply_forgetting_factor(ssm_states: torch.Tensor, alpha: float) -> torch.Tensor:
+    """Scale recurrent states to reduce retained information."""
     return ssm_states * alpha
 
 
-def run_state_chain(model, tokenizer, sessions, device, state_dir, alpha=None):
-    output_data = {}
-    carryover_ssm, carryover_conv = None, None
-
-    for session_id, session in enumerate(sessions):
-        snapshots = data.build_turn_snapshots(session)
-
-        for snap in snapshots:
-            turn_id = snap["turn_id"]
-            turns_since_boundary = turn_id 
-
-            if turn_id == 0 and carryover_ssm is not None and alpha is not None:
-                seed_ssm = apply_forgetting_factor(carryover_ssm, alpha)
-                seed_conv = carryover_conv
-                ssm_states, conv_states, state_latency, state_ppl = evaluate_module.evaluate_injected(
-                    model, tokenizer, snap["new_text"], seed_ssm, seed_conv, device=device
-                )
-            elif turn_id == 0:
-                state_output, state_latency, state_ppl = evaluate_module.evaluate_baseline(
-                    model, tokenizer, snap["history_text"], snap["new_text"], device=device
-                )
-                ssm_states, conv_states = state_utils.extract_state(state_output)
-            else:
-                prev_ssm, prev_conv = state_utils.load_state(state_dir, device="cpu")
-                ssm_states, conv_states, state_latency, state_ppl = evaluate_module.evaluate_injected(
-                    model, tokenizer, snap["new_text"], prev_ssm, prev_conv, device=device
-                )
-
-            # Save state to disk as CPU tensors to avoid keeping GPU copies
-            state_utils.save_state(ssm_states, conv_states, state_dir)
-
-            # Ensure we keep only CPU copies for carryover between sessions
-            carryover_ssm, carryover_conv = ssm_states.cpu(), conv_states.cpu()
-
-            # Free local references to large tensors and clear CUDA cache
-            try:
-                del ssm_states
-                del conv_states
-            except Exception:
-                pass
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-
-            if snap["role"] == "assistant":
-                output_data[(session_id, turn_id)] = {
-                    "state_latency": state_latency,
-                    "state_size_kb": utils.get_memory_size_kb(state_dir),
-                    "state_ppl": state_ppl,
-                    "turns_since_boundary": turns_since_boundary,
-                    "is_first_session": session_id == 0,
-                }
-
-    return output_data
-
-
-def aggregate_by_boundary_offset(output_data, exclude_first_session=True):
-    bucket = defaultdict(lambda: defaultdict(list))
-    for (_session_id, _turn_id), metrics in output_data.items():
-        if exclude_first_session and metrics["is_first_session"]:
-            continue
-        offset = metrics["turns_since_boundary"]
-        for k in ("state_ppl", "state_latency", "state_size_kb"):
-            bucket[offset][k].append(metrics[k])
-
-    agg = {}
-    for offset, metric_lists in bucket.items():
-        agg[offset] = {}
-        n = None
-        for k, values in metric_lists.items():
-            agg[offset][f"{k}_mean"] = float(np.mean(values))
-            agg[offset][f"{k}_std"] = float(np.std(values))
-            n = len(values)
-        agg[offset]["n"] = n
-    return agg
-
-
-def aggregate_boundary_only_by_session(output_data):
-    rows = []
-    for (session_id, turn_id), metrics in sorted(output_data.items()):
-        if turn_id == 0 and not metrics["is_first_session"]:
-            rows.append((session_id, metrics["state_ppl"]))
-    return rows
-
-
-def summarize_boundary_health(df: pd.DataFrame, threshold=1.5):
-    baseline = df[(df["label"] == "cold_start") & (df["offset"] == 0)]
-    if baseline.empty:
-        print("No cold_start baseline found at offset=0 -- skipping summary.")
-        return
-    baseline_ppl = baseline["state_ppl_mean"].iloc[0]
-
-    print(f"\n{'='*50}")
-    print(f"Boundary-turn perplexity vs cold_start baseline ({baseline_ppl:.3f})")
-    print(f"{'='*50}")
-    for label in sorted(df["label"].unique()):
-        if label == "cold_start":
-            continue
-        row = df[(df["label"] == label) & (df["offset"] == 0)]
-        if row.empty:
-            continue
-        ppl = row["state_ppl_mean"].iloc[0]
-        ratio = ppl / baseline_ppl
-        status = "OK" if ratio <= threshold else "DEGRADED"
-        print(f"  [{status}] {label:12s}  ppl={ppl:8.3f}  ratio={ratio:5.2f}x")
-
-
+def run_state_chain(
+    model,
+    tokenizer,
+    sessions,
+    device,
+    state_dir: str,
+    alpha: float = None,
+) -> dict:
+    """Run the shared state chain with optional alpha carry-over."""
+    runner = StateRunner(
+        state_dir,
+        state_seed=(
+            lambda prev_ssm, prev_conv: (
+                apply_forgetting_factor(prev_ssm, alpha),
+                prev_conv,
+            )
+        )
+        if alpha is not None
+        else None,
+        use_carryover=alpha is not None,
+    )
+    return runner.run_chain(model, tokenizer, sessions, device)
 
 def run_experiment_3(
     model, tokenizer, sessions,
     output_dir, experiment_3_benchmark_path, plot_dir,
     device, alpha_list=(None, 1.0, 0.999, 0.99, 0.9),
 ):
+    """Run Experiment 3 across forgetting-factor configurations."""
     all_agg = {}           # label -> {offset: agg metrics}
     all_boundary_seq = {}  # label -> [(session_id, ppl), ...]
 
     for alpha in alpha_list:
-        label = "cold_start" if alpha is None else f"alpha_{alpha}"
+        label = "baseline" if alpha is None else f"carryover_alpha_{alpha}"
         print(f"\n{'='*50}")
         print(f"Experiment 3: running chain with {label}")
         print(f"{'='*50}")
@@ -152,31 +80,10 @@ def run_experiment_3(
         print(f"Experiment 3: finished {label}")
         torch.cuda.empty_cache()
 
-    with open(experiment_3_benchmark_path, "w", newline="") as f:
-        writer = csv.writer(f)
-        writer.writerow([
-            "label", "offset", "n",
-            "state_ppl_mean", "state_ppl_std",
-            "state_latency_mean", "state_latency_std",
-            "state_size_kb_mean", "state_size_kb_std",
-        ])
-        for label, agg in all_agg.items():
-            for offset in sorted(agg):
-                a = agg[offset]
-                writer.writerow([
-                    label, offset, a.get("n", 0),
-                    a.get("state_ppl_mean", ""), a.get("state_ppl_std", ""),
-                    a.get("state_latency_mean", ""), a.get("state_latency_std", ""),
-                    a.get("state_size_kb_mean", ""), a.get("state_size_kb_std", ""),
-                ])
+    write_experiment_summary_csv(experiment_3_benchmark_path, all_agg)
 
     boundary_csv_path = str(Path(experiment_3_benchmark_path).with_name("experiment3_boundary_sequence.csv"))
-    with open(boundary_csv_path, "w", newline="") as f:
-        writer = csv.writer(f)
-        writer.writerow(["label", "session_id", "boundary_ppl"])
-        for label, rows in all_boundary_seq.items():
-            for session_id, ppl in rows:
-                writer.writerow([label, session_id, ppl])
+    write_boundary_sequence_csv(boundary_csv_path, all_boundary_seq)
 
     df = pd.read_csv(experiment_3_benchmark_path)
     boundary_df = pd.read_csv(boundary_csv_path)
@@ -194,9 +101,9 @@ def main():
 
     paths = config["paths"]
     root = Path(__file__).parent.parent
-    output_dir = str(root) + "/" + paths["output_dir"]
-    plot_dir = str(root) + "/" + paths["plot_dir"]
-    experiment3_path = output_dir + "/experiment3/experiment3.csv"
+    output_dir = Path(root) / paths["output_dir"]
+    plot_dir = Path(root) / paths["plot_dir"]
+    experiment3_path = output_dir / "experiment3" / "experiment3.csv"
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     model, tokenizer = model_loader.load_model(
@@ -216,9 +123,9 @@ def main():
 
     df, boundary_df = run_experiment_3(
         model, tokenizer, test_sessions,
-        output_dir + "/experiment3",
-        experiment3_path,
-        plot_dir + "/experiment3",
+        str(output_dir / "experiment3"),
+        str(experiment3_path),
+        str(plot_dir / "experiment3"),
         device,
         alpha_list=alpha_list,
     )
@@ -226,5 +133,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-

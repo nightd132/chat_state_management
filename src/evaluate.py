@@ -8,9 +8,16 @@ from src.mamba2_stateful import run_forward_with_states
 
 
 def evaluate_baseline(model, tokenizer, history_text, input_text, device="cpu"):
-    full_ids    = tokenizer(history_text, return_tensors="pt").input_ids.to(device)
-    new_ids     = tokenizer(input_text,   return_tensors="pt").input_ids.to(device)
-    prefix_len  = full_ids.shape[1] - new_ids.shape[1]
+    """Evaluate new tokens by running the model on the full text history."""
+    full_ids = tokenizer(history_text, return_tensors="pt").input_ids.to(device)
+    new_ids = tokenizer(input_text, return_tensors="pt").input_ids.to(device)
+
+    if full_ids.numel() == 0 or full_ids.shape[1] == 0:
+        return None, 0.0, float("nan")
+    if new_ids.numel() == 0 or new_ids.shape[1] == 0:
+        return None, 0.0, float("nan")
+
+    prefix_len = full_ids.shape[1] - new_ids.shape[1]
 
     labels = full_ids.clone()
     labels[0, :prefix_len] = -100   # mask everything except new tokens
@@ -20,13 +27,19 @@ def evaluate_baseline(model, tokenizer, history_text, input_text, device="cpu"):
     start = time.perf_counter()
 
     with torch.inference_mode():
-        output = model(input_ids=full_ids, labels=labels)
+        output = model(input_ids=full_ids)
 
     if torch.cuda.is_available():
         torch.cuda.synchronize()
     latency = time.perf_counter() - start
 
-    loss = output.loss.item() if output.loss is not None else 0.0
+    shift_logits = output.logits[:, :-1].contiguous()
+    shift_labels = labels[:, 1:].contiguous()
+    loss = F.cross_entropy(
+        shift_logits.view(-1, shift_logits.size(-1)),
+        shift_labels.view(-1),
+        ignore_index=-100,
+    ).item()
     ppl  = math.exp(loss) if loss > 0 else 0.0
     torch.cuda.empty_cache()
     return output, latency, ppl
@@ -34,9 +47,13 @@ def evaluate_baseline(model, tokenizer, history_text, input_text, device="cpu"):
 
 
 def evaluate_injected(model, tokenizer, new_text: str, ssm_states, conv_states, device: str = "cpu"):
+    """Evaluate new tokens using previously captured recurrent states."""
 
     inputs = tokenizer(new_text, return_tensors="pt").to(device)
     input_ids = inputs["input_ids"]  # (1, L)
+
+    if input_ids.numel() == 0 or input_ids.shape[1] == 0:
+        return ssm_states, conv_states, 0.0, float("nan")
 
     if torch.cuda.is_available():
         torch.cuda.synchronize()
@@ -61,5 +78,3 @@ def evaluate_injected(model, tokenizer, new_text: str, ssm_states, conv_states, 
     perplexity = math.exp(loss.item())
     torch.cuda.empty_cache()
     return new_ssm, new_conv, latency, perplexity
-
-

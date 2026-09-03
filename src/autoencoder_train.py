@@ -1,14 +1,114 @@
-from src import model_loader, state_utils, evaluate as evaluate_module, data, autoencoder, plot, utils
+from src import model_loader, data, autoencoder, utils
 
-import copy
-import yaml
 import torch
-import pandas as pd
-import csv
-import time
 import torch.nn as nn
-import numpy as np
 from pathlib import Path
+import argparse
+
+
+def collect_states(model, tokenizer, sessions, max_seq_len, save_dir, max_samples, force: bool = False):
+    """Collect recurrent states for assistant turns from a session split.
+
+    If `force` is True, any existing `sample_*.pt` files under `save_dir` are removed
+    so collection starts from zero. If `force` is False and enough samples already
+    exist (>= `max_samples`) collection is skipped and the existing count is returned.
+    """
+    # If samples already exist, resume from there or skip entirely. When forcing,
+    # delete existing samples so collection restarts.
+    layer0_dir = save_dir / "layer_0"
+    existing_count = 0
+    if layer0_dir.exists():
+        existing_count = len(list(layer0_dir.glob("sample_*.pt")))
+        if existing_count >= max_samples and not force:
+            print(f"Found {existing_count} existing samples in {save_dir}; skipping collection.")
+            return existing_count
+    if force and save_dir.exists():
+        # remove existing sample files for all layers so collection restarts cleanly
+        for layer_path in save_dir.glob("layer_*"):
+            for p in layer_path.glob("sample_*.pt"):
+                try:
+                    p.unlink()
+                except Exception:
+                    pass
+        existing_count = 0
+    count = existing_count
+    for session in sessions:
+        for snap in data.build_turn_snapshots(session):
+            if snap["role"] != "assistant":
+                continue
+            inputs = tokenizer(
+                snap["history_text"],
+                max_length=max_seq_len,
+                truncation=True,
+                return_tensors="pt",
+            ).to(next(model.parameters()).device)
+            with torch.no_grad():
+                output = model(inputs["input_ids"], use_cache=True)
+            for layer_idx, layer in enumerate(output.cache_params.layers):
+                layer_dir = save_dir / f"layer_{layer_idx}"
+                layer_dir.mkdir(parents=True, exist_ok=True)
+                sample_path = layer_dir / f"sample_{count:06d}.pt"
+                if sample_path.exists():
+                    # avoid overwriting existing sample files (shouldn't happen when forcing)
+                    continue
+                torch.save(
+                    {"state": layer.recurrent_states.squeeze(0).cpu()},
+                    sample_path,
+                )
+            count += 1
+            if count >= max_samples:
+                return count
+    return count
+
+
+def load_states(save_dir, layer_idx, count):
+    """Load flattened recurrent-state samples for one layer."""
+    layer_dir = Path(save_dir) / f"layer_{layer_idx}"
+    states = []
+    available = 0
+    for idx in range(count):
+        path = layer_dir / f"sample_{idx:06d}.pt"
+        if not path.exists():
+            # stop at first missing sample and return what we have
+            break
+        data = torch.load(path, map_location="cpu")
+        st = data.get("state")
+        if st is None:
+            continue
+        # convert to float32 for training, keep shape (nheads, head_dim, d_state)
+        st = st.float()
+        states.append(st)
+        available += 1
+
+    if available == 0:
+        raise FileNotFoundError(f"No state samples found in {layer_dir}")
+
+    # Ensure all samples share the same shape
+    first_shape = tuple(states[0].shape)
+    for i, s in enumerate(states):
+        if tuple(s.shape) != first_shape:
+            raise ValueError(f"Inconsistent sample shape at index {i}: {s.shape} != {first_shape}")
+
+    # Stack into (N, nheads, head_dim, d_state)
+    stacked = torch.stack(states, dim=0)
+    return stacked
+
+
+def reconstruction_loss(ae, states, device):
+    """Measure held-out reconstruction MSE without updating model weights."""
+    ae.eval()
+    with torch.no_grad():
+        # Ensure tensor on correct device and flattened to (N, feature_dim)
+        values = states.to(device)
+        if values.ndim > 2:
+            values = values.view(values.shape[0], -1)
+        # If training used per-head flattening (fit calls view(-1, input_dim)),
+        # reconstruction should also reshape to match the autoencoder input.
+        if values.shape[1] % ae.input_dim == 0 and values.shape[1] != ae.input_dim:
+            # Collapse any stacked-heads dimension into more rows of input_dim
+            values = values.view(-1, ae.input_dim)
+        reconstructed, _ = ae(values)
+        return nn.functional.mse_loss(reconstructed, values).item()
 
 
 def main():
@@ -39,63 +139,37 @@ def main():
 
     sessions = data.extract_sessions(dataset)
 
-    list_of_snapshots = []
-
-    for session in sessions[1000:]:
-        train_snapshots = data.build_turn_snapshots(session)
-        list_of_snapshots.append(train_snapshots)
+    train_sessions, val_sessions, test_sessions = data.split_sessions(
+        sessions, train=0.70, val=0.15, test=0.15, seed=42
+    )
 
     num_layers = 24
 
-    count = 0
     max_sample = 1000
-    stop = False
-
     save_training_dir = root / "autoencoder_training_data"
     save_training_dir.mkdir(parents=True, exist_ok=True)
 
-    # DATA COLLECTION
-    for idx, snapshots in enumerate(list_of_snapshots):
-        for idx_snap, snap in enumerate(snapshots):
+    split_sessions = {
+        "train": train_sessions,
+        "validation": val_sessions,
+        "test": test_sessions,
+    }
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--force-collect", action="store_true", help="Remove existing samples and re-collect training states")
+    args = parser.parse_args()
 
-            if snap["role"] == "assistant":
-                inputs = tokenizer(
-                    snap["history_text"],
-                    max_length=max_seq_len, truncation=True,
-                    return_tensors="pt"
-                ).to(device)
-    
+    print("Collecting recurrent states for training autoencoders...")
+    split_counts = {}
+    for split_name, split in split_sessions.items():
+        split_dir = save_training_dir / split_name
+        split_counts[split_name] = collect_states(
+            model, tokenizer, split, max_seq_len, split_dir, max_sample, force=args.force_collect
+        )
+        print(f"Collected {split_counts[split_name]} {split_name} state samples")
 
-                with torch.no_grad():
-                    output = model(inputs["input_ids"], use_cache=True)
-
-                cache = output.cache_params
-
-                for layer_idx, layer in enumerate(cache.layers):
-
-                    layer_dir = save_training_dir / f"layer_{layer_idx}"
-                    layer_dir.mkdir(parents=True, exist_ok=True)
-
-                    state = layer.recurrent_states.squeeze(0).cpu()
-
-                    save_path = layer_dir / f"sample_{count:06d}.pt"
-
-                    torch.save({"state": state}, save_path)
-
-                count += 1
-
-            if count >= max_sample:
-                stop = True
-                print(f"Snap: {idx_snap}")
-                break
-
-        if stop:
-            print(f"Snapshot: {idx}")
-            break
-
-
+    print("Training autoencoders for each layer and latent dimension...")
     # AUTOENCODER TRAINING
-    latent_dims = [256, 512, 1024]
+    latent_dims = [1024, 2048, 4096]
     num_layers = 24
 
     ae_experiments = {
@@ -119,19 +193,25 @@ def main():
             print(f"Training layer {layer_idx}, latent {latent_dim}")
             print("=" * 50)
 
-            # load dataset
-            all_states = []
+            train_states = load_states(
+                save_training_dir / "train", layer_idx, split_counts["train"]
+            )
+            validation_states = load_states(
+                save_training_dir / "validation", layer_idx, split_counts["validation"]
+            )
+            test_states = load_states(
+                save_training_dir / "test", layer_idx, split_counts["test"]
+            )
 
-            for idx in range(max_sample):
-                sample = torch.load(
-                    save_training_dir / f"layer_{layer_idx}" / f"sample_{idx:06d}.pt"
-                )
-                all_states.append(sample["state"])
-
-            states = torch.stack(all_states).reshape(len(all_states), -1).float().to(device)
-
-            # TRAIN
-            loss = ae.fit(states, num_epochs=20, batch_size=256, device=device)
+            ae.fit(
+                train_states,
+                num_epochs=20,
+                batch_size=256,
+                device=device,
+                validation_states=validation_states,
+            )
+            test_loss = reconstruction_loss(ae, test_states, device)
+            print(f"  Test reconstruction loss: {test_loss:.6f}")
 
             # SAVE MODEL
             layer_dir = save_dir / f"latent_dim_{latent_dim}" / f"layer_{layer_idx}"
@@ -142,5 +222,4 @@ def main():
 
 if __name__ == "__main__":
     main()
-
 

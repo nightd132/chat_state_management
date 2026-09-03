@@ -1,9 +1,12 @@
+import copy
+
 import torch
 import torch.nn as nn
 
 
 class Autoencoder(nn.Module):
     def __init__(self, head_dim, d_state, hidden_dim):
+        """Create an autoencoder for flattened per-head recurrent states."""
         super().__init__()
         self.hidden_dim = hidden_dim
         self.head_dim   = head_dim
@@ -19,30 +22,48 @@ class Autoencoder(nn.Module):
         )
 
     def encoder(self, x):
+        """Map flattened state vectors into the latent representation."""
         return self.encoder_net(x)
 
     def decoder(self, z):
+        """Reconstruct flattened state vectors from latent representations."""
         out = self.decoder_net(z)
         return out
 
     def forward(self, x):
+        """Encode and reconstruct a batch of state vectors."""
         z = self.encoder(x)
         reconstructed = self.decoder(z)
         return reconstructed, z
 
-    def fit(self, states, num_epochs=10, batch_size=256, learning_rate=1e-3, device="cpu"):
+    def fit(
+        self,
+        states,
+        num_epochs=10,
+        batch_size=256,
+        learning_rate=1e-3,
+        device="cpu",
+        validation_states=None,
+    ):
+        """Train on ``states`` and restore the checkpoint with the best validation loss."""
         self.to(device)
         self.train()
 
         # Flatten to [num_samples * heads, head_dim * d_state]
         num_samples = states.shape[0]
-        data = states.detach().float()
-        data = data.view(-1, self.input_dim).to(device)
+        data = states.detach().float().view(-1, self.input_dim).to(device)
+        validation_data = None
+        if validation_states is not None:
+            validation_data = (
+                validation_states.detach().float().view(-1, self.input_dim).to(device)
+            )
 
         criterion = nn.MSELoss()
         optimizer = torch.optim.Adam(self.parameters(), lr=learning_rate)
 
         loss_history = []
+        best_state = None
+        best_validation_loss = float("inf")
 
         for epoch in range(num_epochs):
             perm = torch.randperm(data.size(0))
@@ -66,6 +87,22 @@ class Autoencoder(nn.Module):
 
             avg_loss = epoch_loss / num_batches
             loss_history.append(avg_loss)
-            print(f"  Epoch [{epoch+1:>3}/{num_epochs}] Loss: {avg_loss:.6f}")
+            message = f"  Epoch [{epoch+1:>3}/{num_epochs}] Loss: {avg_loss:.6f}"
+            if validation_data is not None:
+                self.eval()
+                with torch.no_grad():
+                    validation_loss = criterion(
+                        self(validation_data)[0], validation_data
+                    ).item()
+                if validation_loss < best_validation_loss:
+                    best_validation_loss = validation_loss
+                    best_state = copy.deepcopy(self.state_dict())
+                message += f"  Val: {validation_loss:.6f}"
+                self.train()
+            print(message)
+
+        if best_state is not None:
+            self.load_state_dict(best_state)
 
         return loss_history
+
