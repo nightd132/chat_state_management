@@ -11,3 +11,4 @@ autoencoder_training_data
 /results/experiment2/cache
 /results/experiment3/cache
 /results/experiment4/cache
+/results/experiment2/state_compressed_ae_*

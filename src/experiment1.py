@@ -4,6 +4,7 @@ from pathlib import Path
 import pandas as pd
 import torch
 from tqdm import tqdm
+import math
 
 from src import model_loader, state_utils, data, plot, utils
 from src.evaluate import evaluate_baseline, evaluate_injected
@@ -51,11 +52,12 @@ def run_baseline_session(model, tokenizer, snapshots, device,
         utils.save_text(history_text, text_history_dir)
 
         if snap["role"] == "assistant":
-            output_data[turn_id] = {
-                "baseline_latency": latency,
-                "baseline_ppl": ppl,
-                "txt_size_kb": utils.get_memory_size_kb(text_history_dir)
-            }
+            if ppl is not None and not (isinstance(ppl, float) and math.isnan(ppl)):
+                output_data[turn_id] = {
+                    "baseline_latency": latency,
+                    "baseline_ppl": ppl,
+                    "txt_size_kb": utils.get_memory_size_kb(text_history_dir)
+                }
 
         print_memory_stats()
 
@@ -248,9 +250,9 @@ def main():
     plot.plot_ppl_comparison(df, ppl_plot_path)
     plot.plot_latency_comparison(df, latency_plot_path)
 
-    plot.plot_memory_growth(df, plot_dir + "/experiment1/memory_growth.png")
+    plot.plot_memory_growth(df, plot_dir / "memory_growth.png")
 
-    plot.plot_speedup(df, plot_dir + "/experiment1/speedup.png")
+    plot.plot_speedup(df, plot_dir / "speedup.png")
 
     print("Experiment 1 complete.")
     print(f"Plots saved to {plot_dir}/experiment1/")

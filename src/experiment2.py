@@ -4,10 +4,13 @@ from pathlib import Path
 
 import torch
 from torch import nn
+import pandas as pd
+from tqdm import tqdm
 
 from src import model_loader, state_utils, evaluate as evaluate_module, data, autoencoder, plot, utils
 from src.cache_utils import get_torch_cache_path, save_torch_cache, load_torch_cache
 from src.log_utils import print_section, print_memory_stats
+from src.mamba2_stateful import patch_model
 
 NUM_HEADS = 24
 HEAD_DIM = 64
@@ -107,7 +110,7 @@ def run_autoencoder(model, tokenizer, snapshots, device, state_dir, ae_list):
             )
             ssm_states, conv_states = state_utils.extract_state(state_output)
         else:
-            payload = load_torch_cache(state_dir, device=device)
+            payload = load_torch_cache(state_dir, "exp2", "ae", device=device)
             latents = payload["ssm_latents"]      # {layer_idx: [heads, latent_dim]}
             conv_states = payload["conv_states"].to(device)
 
@@ -185,7 +188,7 @@ def run_quantization(model, tokenizer, snapshots, device, state_dir, num_bits=8)
             ssm_states, conv_states = state_utils.extract_state(state_output)
         else:
             
-            payload = load_compressed_payload(state_dir, device="cpu")
+            payload = load_torch_cache(state_dir, "exp2", f"quant_{num_bits}bit", device="cpu")
             q_ssm = payload["q_ssm"]
             scale = payload["scale"]
             zero_point = payload["zero_point"]
@@ -214,12 +217,14 @@ def run_quantization(model, tokenizer, snapshots, device, state_dir, num_bits=8)
         if torch.cuda.is_available():
             torch.cuda.synchronize()
         quantize_latency = time.perf_counter() - start_time
-        save_compressed_payload(
+        save_torch_cache(
             {
                 "q_ssm": q_ssm, "scale": scale, "zero_point": zero_point,
                 "conv_states": conv_states.cpu(),
             },
-            state_dir
+            state_dir,
+            "exp2",
+            f"quant_{num_bits}bit",
         )
 
         if snap["role"] == "assistant":
@@ -254,7 +259,7 @@ def run_autoencoder_quantization(model, tokenizer, snapshots, device, state_dir,
             )
             ssm_states, conv_states = state_utils.extract_state(state_output)
         else:
-            payload = load_compressed_payload(state_dir, device="cpu")
+            payload = load_torch_cache(state_dir, "exp2", "ae_quant", device="cpu")
             q_latents = payload["q_latents"]      # [num_layers, heads, latent_dim]
             scale = payload["scale"]
             zero_point = payload["zero_point"]
@@ -303,12 +308,14 @@ def run_autoencoder_quantization(model, tokenizer, snapshots, device, state_dir,
             torch.cuda.synchronize()
         encode_latency = time.perf_counter() - start_time
 
-        save_compressed_payload(
+        save_torch_cache(
             {
                 "q_latents": q_latents, "scale": scale, "zero_point": zero_point,
                 "conv_states": conv_states.cpu(),
             },
-            state_dir
+            state_dir,
+            "exp2",
+            "ae_quant",
         )
  
         if snap["role"] == "assistant":
@@ -572,6 +579,32 @@ def main():
     latent_dims = [1024, 2048, 4096]
     num_layers = 24
 
+    ae_experiments = {}
+
+    for latent_dim in latent_dims:
+        ae_list = nn.ModuleList()
+
+        for layer_idx in range(num_layers):
+            ae = autoencoder.Autoencoder(
+                head_dim=64,
+                d_state=128,
+                hidden_dim=latent_dim,
+            )
+
+            checkpoint = (
+                root
+                / "autoencoders"
+                / f"latent_dim_{latent_dim}"
+                / f"layer_{layer_idx}"
+                / "autoencoder.pt"
+            )
+
+            ae.load_state_dict(torch.load(checkpoint, map_location=device))
+            ae.eval()
+            ae_list.append(ae)
+
+        ae_experiments[latent_dim] = ae_list
+
     ae_untrained_experiments = {
         ld: nn.ModuleList([
             autoencoder.Autoencoder(head_dim=64, d_state=128, hidden_dim=ld)
@@ -592,6 +625,7 @@ def main():
         plot_dir + "/experiment2",
         device,
         quant_bits_list=quant_bits_list,
+        ae_experiments=ae_experiments,
         ae_untrained_experiments=ae_untrained_experiments,
         force_rerun=force_rerun
     )

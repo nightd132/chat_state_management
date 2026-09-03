@@ -74,6 +74,10 @@ def aggregate_turn_results(all_session_results):
     for session_result in all_session_results:
         for turn_id, metrics in session_result.items():
             for metric, value in metrics.items():
+                if value is None:
+                    continue
+                if isinstance(value, float) and np.isnan(value):
+                    continue
                 turn_metric_values[turn_id][metric].append(value)
 
     aggregated = {}
@@ -81,9 +85,15 @@ def aggregate_turn_results(all_session_results):
         aggregated[turn_id] = {}
         n = None
         for metric, values in turn_metric_values[turn_id].items():
-            aggregated[turn_id][f"{metric}_mean"] = float(np.mean(values))
-            aggregated[turn_id][f"{metric}_std"]  = float(np.std(values))
-            n = len(values)
+            valid_values = [float(v) for v in values if v is not None and not (isinstance(v, float) and np.isnan(v))]
+            if not valid_values:
+                aggregated[turn_id][f"{metric}_mean"] = float("nan")
+                aggregated[turn_id][f"{metric}_std"] = float("nan")
+                n = 0
+                continue
+            aggregated[turn_id][f"{metric}_mean"] = float(np.mean(valid_values))
+            aggregated[turn_id][f"{metric}_std"] = float(np.std(valid_values))
+            n = len(valid_values)
         aggregated[turn_id]["n_sessions"] = n
 
     return aggregated

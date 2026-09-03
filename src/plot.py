@@ -10,11 +10,32 @@ def _ensure_dir(path):
     Path(path).parent.mkdir(parents=True, exist_ok=True)
 
 
+def _coerce_numeric_columns(df: pd.DataFrame, columns: list[str]) -> pd.DataFrame:
+    """Convert columns to numeric while tolerating empty values from saved CSV exports."""
+    cleaned = df.copy()
+    for column in columns:
+        if column in cleaned.columns:
+            cleaned[column] = pd.to_numeric(cleaned[column], errors="coerce")
+    return cleaned
+
+
 def _normalise_comparison_data(df: pd.DataFrame, experiment: str) -> pd.DataFrame:
     """Convert a wide experiment result table to plotting rows."""
-    """Convert experiment-specific wide data to a common plotting schema."""
     rows = []
     if experiment == "experiment1":
+        df = _coerce_numeric_columns(
+            df,
+            [
+                "turn",
+                "baseline_ppl_mean", "baseline_ppl_std",
+                "state_ppl_mean", "state_ppl_std",
+                "baseline_latency_mean", "baseline_latency_std",
+                "state_latency_mean", "state_latency_std",
+                "txt_size_kb_mean", "txt_size_kb_std",
+                "pt_size_kb_mean", "pt_size_kb_std",
+            ],
+        )
+        rows = []
         for _, row in df.iterrows():
             for condition, prefix in (("baseline", "baseline"), ("state", "state")):
                 rows.append({
@@ -67,18 +88,27 @@ def _plot_normalised_metric(
     """Plot one normalized metric with mean and standard-deviation bands."""
     _ensure_dir(plot_path)
     fig, ax = plt.subplots(figsize=(10, 6))
+    any_plotted = False
     for condition in sorted(data["condition"].unique()):
         group = data[data["condition"] == condition].sort_values("step")
-        mean = group[f"{metric}_mean"]
-        std = group[f"{metric}_std"]
-        ax.plot(group["step"], mean, marker="o", label=condition)
-        ax.fill_between(group["step"], mean - std, mean + std, alpha=0.15)
+        # skip groups with no valid metric values
+        if f"{metric}_mean" not in group.columns:
+            continue
+        mean = pd.to_numeric(group[f"{metric}_mean"], errors="coerce").dropna()
+        if mean.empty:
+            continue
+        # align std to the group's index where mean is valid
+        std = pd.to_numeric(group.get(f"{metric}_std", pd.Series(index=group.index)), errors="coerce").reindex(mean.index).fillna(0)
+        ax.plot(group.loc[mean.index, "step"], mean, marker="o", label=condition)
+        ax.fill_between(group.loc[mean.index, "step"], mean - std, mean + std, alpha=0.15)
+        any_plotted = True
     if log_scale:
         ax.set_yscale("log")
     ax.set_xlabel("Step")
     ax.set_ylabel(ylabel)
     ax.set_title(title)
-    ax.legend(fontsize=8)
+    if any_plotted:
+        ax.legend(fontsize=8)
     ax.grid(True, which="both" if log_scale else "major", alpha=0.3)
     fig.tight_layout()
     fig.savefig(plot_path)
@@ -120,10 +150,21 @@ def plot_memory_growth(df: pd.DataFrame, plot_path: str):
 
 def plot_speedup(df: pd.DataFrame, plot_path: str):
     """Plot baseline-to-state latency speedup by turn."""
+    df = _coerce_numeric_columns(
+        df,
+        [
+            "turn",
+            "baseline_latency_mean",
+            "state_latency_mean",
+        ],
+    )
+    df = df.dropna(subset=["turn", "baseline_latency_mean", "state_latency_mean"]).copy()
+    df = df[df["state_latency_mean"] != 0]
+
     _ensure_dir(plot_path)
     fig, ax = plt.subplots(figsize=(10, 6))
 
-    turns   = df["turn"].values
+    turns = df["turn"].values
     speedup = df["baseline_latency_mean"].values / df["state_latency_mean"].values
 
     ax.plot(turns, speedup, marker="o", color="green", label="Speedup (baseline / state)")

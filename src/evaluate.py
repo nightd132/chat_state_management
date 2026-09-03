@@ -9,9 +9,15 @@ from src.mamba2_stateful import run_forward_with_states
 
 def evaluate_baseline(model, tokenizer, history_text, input_text, device="cpu"):
     """Evaluate new tokens by running the model on the full text history."""
-    full_ids    = tokenizer(history_text, return_tensors="pt").input_ids.to(device)
-    new_ids     = tokenizer(input_text,   return_tensors="pt").input_ids.to(device)
-    prefix_len  = full_ids.shape[1] - new_ids.shape[1]
+    full_ids = tokenizer(history_text, return_tensors="pt").input_ids.to(device)
+    new_ids = tokenizer(input_text, return_tensors="pt").input_ids.to(device)
+
+    if full_ids.numel() == 0 or full_ids.shape[1] == 0:
+        return None, 0.0, float("nan")
+    if new_ids.numel() == 0 or new_ids.shape[1] == 0:
+        return None, 0.0, float("nan")
+
+    prefix_len = full_ids.shape[1] - new_ids.shape[1]
 
     labels = full_ids.clone()
     labels[0, :prefix_len] = -100   # mask everything except new tokens
@@ -45,6 +51,9 @@ def evaluate_injected(model, tokenizer, new_text: str, ssm_states, conv_states, 
 
     inputs = tokenizer(new_text, return_tensors="pt").to(device)
     input_ids = inputs["input_ids"]  # (1, L)
+
+    if input_ids.numel() == 0 or input_ids.shape[1] == 0:
+        return ssm_states, conv_states, 0.0, float("nan")
 
     if torch.cuda.is_available():
         torch.cuda.synchronize()
