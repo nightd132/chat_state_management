@@ -42,7 +42,7 @@ def run_baseline_session(model, tokenizer, snapshots, device,
 
         _, latency, ppl = evaluate_baseline(
             model, tokenizer,
-            history_text=truncated_history_text,
+            history_text=truncated_text,
             input_text=new_text,
             device=device,
         )

@@ -440,6 +440,28 @@ def run_experiment_2_session(
         print(f"{'='*50}")
         torch.cuda.empty_cache()
 
+    # trained + quantization int 8 bit
+    if ae_experiments:
+        for latent_dim, ae_list in ae_experiments.items():
+            print(f"\n{'='*50}")
+            print(f"Session {session_id}: running trained AE latent_dim={latent_dim} + quantization 8 bit")
+            print(f"{'='*50}")
+
+            compress_dir = f"{output_dir}/state_compressed_ae_{latent_dim}_quan_8.pt"
+
+            ae_results = utils.run_with_cache(
+                output_dir, f"ae_{latent_dim}_quan_8", session_id, f"ae_{latent_dim}_quan_8" in force_rerun,
+                lambda: run_autoencoder_quantization(
+                    model, tokenizer, snapshots, device, compress_dir, ae_list, 8
+                )
+            )
+
+            session_results[f"ae_{latent_dim}_quan_8"] = build_turn_dict(ae_results)
+
+            print(f"Session {session_id}: finished trained AE latent_dim={latent_dim} + quantization 8 bit")
+            print(f"{'='*50}")
+            torch.cuda.empty_cache()
+
     # untrained + quantization int 8 bit
     if ae_untrained_experiments:
         for latent_dim, ae_list in ae_untrained_experiments.items():
