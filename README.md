@@ -2,9 +2,7 @@
 
 
 ## Installation
-The project is tested with Python 3.11. A CUDA-capable Linux environment is
-recommended because the default configuration uses the Mamba2 model with
-`cuda` and `bfloat16`.
+The project is tested with Python 3.11. A CUDA-capable Linux environment is recommended because the default configuration uses the Mamba2 model with `cuda` and `bfloat16`. The experiment is run on Nvidia RTX6000	24GB at first but for some reason (someone use this) I had to change to Nvidia Tesla A100 80 GB (my uni gpu servers).
 
 Create and activate a virtual environment:
 ```shell
@@ -16,11 +14,6 @@ Install the required dependencies:
 ```shell
 pip install -r requirements.txt
 ```
-
-For CPU-only execution, edit `configs/config1.yaml` and set
-`model.device` to `cpu` and `model.dtype` to a dtype supported by the local
-PyTorch installation. Model downloads and the full dataset still require
-network access and substantial memory.
 
 ## How to Run the Code
 Run the initial experiments with:
@@ -38,8 +31,7 @@ Then run the compression comparison:
 python -m src.experiment2
 ```
 
-The state carry-over experiments can be run independently after installing
-the dependencies:
+The state carry-over experiments can be run independently after installing the dependencies:
 ```shell
 python -m src.experiment3
 python -m src.experiment4
@@ -73,19 +65,10 @@ entry point.
 
 ## Results
 Results are stored under `results/`:
-- `results/experiment1/experiment1.csv` contains paired baseline/state PPL,
-  latency, text-history size, state size, and comparison metrics.
-- `results/experiment2/experiment2.csv` contains compression-method
-  comparisons and their PPL, latency, and storage metrics.
-- `results/experiment3/experiment3.csv` contains forgetting-factor summary
-  metrics, and `experiment3_boundary_sequence.csv` contains boundary values.
-- `results/experiment4/experiment4.csv` contains EMA summary metrics, and
-  `experiment4_boundary_sequence.csv` contains boundary values.
-- `results/plots/experiment1/`, `results/plots/experiment2/`,
-  `results/plots/experiment3/`, and `results/plots/experiment4/` contain
-  generated figures.
+- `results/experiment1/experiment1.csv` contains paired baseline/state PPL, latency, text-history size, state size, and comparison metrics.
+- `results/experiment2/experiment2.csv` contains compression-method comparisons and their PPL, latency, and storage metrics.
+- `results/experiment3/experiment3.csv` contains forgetting-factor summary metrics, and `experiment3_boundary_sequence.csv` contains boundary values.
+- `results/experiment4/experiment4.csv` contains EMA summary metrics, and `experiment4_boundary_sequence.csv` contains boundary values.
+- `results/plots/experiment1/`, `results/plots/experiment2/`, `results/plots/experiment3/`, and `results/plots/experiment4/` contain generated figures.
 
-Common metrics are measured per turn or boundary: PPL is perplexity,
-latency is elapsed inference time in seconds, and text/state size is the
-serialized storage size in KB. Experiment 2 additionally reports compression
-and speed comparisons between the uncompressed baseline and each method.
+Common metrics are measured per turn or boundary: PPL is perplexity, latency is elapsed inference time in seconds, and text/state size is the serialized storage size in KB. Experiment 2 additionally reports compression and speed comparisons between the uncompressed baseline and each method.
