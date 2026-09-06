@@ -116,6 +116,9 @@ class StateRunner:
         for session_id, session in enumerate(sessions):
             session_ssm = None
             session_conv = None
+            previous_ssm = current_ssm
+            previous_conv = current_conv
+
             for snap in data.build_turn_snapshots(session):
                 ssm_states, conv_states, state_latency, state_ppl = self.run_turn(
                     model,
@@ -144,8 +147,8 @@ class StateRunner:
 
             if self.carryover_update is not None and session_ssm is not None:
                 current_ssm, current_conv = self.carryover_update(
-                    current_ssm,
-                    current_conv,
+                    previous_ssm,
+                    previous_conv,
                     session_ssm,
                     session_conv,
                 )

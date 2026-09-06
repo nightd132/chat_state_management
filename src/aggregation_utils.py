@@ -71,11 +71,19 @@ def aggregate_by_boundary_offset(
 def aggregate_boundary_only_by_session(
     output_data: Dict
 ) -> List[Tuple[int, float]]:
-    """Extract first-turn perplexity for each non-initial session."""
-    rows = []
+    """Extract the first assistant-turn perplexity for each non-initial session."""
+    by_session = defaultdict(list)
     for (session_id, turn_id), metrics in sorted(output_data.items()):
-        if turn_id == 0 and not metrics["is_first_session"]:
-            rows.append((session_id, metrics["state_ppl"]))
+        if metrics.get("is_first_session"):
+            continue
+        by_session[session_id].append((turn_id, metrics["state_ppl"]))
+
+    rows = []
+    for session_id, values in sorted(by_session.items()):
+        if not values:
+            continue
+        _, boundary_ppl = min(values, key=lambda item: item[0])
+        rows.append((session_id, boundary_ppl))
     return rows
 
 def summarize_boundary_health(
